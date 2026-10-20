@@ -1,5 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <!-- A: the prompt chevron, its tip tied off in a mooring ring -->
-  <path d="M60 64 L132 128 L60 192" fill="none" stroke="#000" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="170" cy="128" r="36" fill="none" stroke="#000" stroke-width="24"/>
-</svg>

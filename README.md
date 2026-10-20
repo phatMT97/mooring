@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/brand/mooring-readme-header.png" alt="Mooring — your terminals and their agents, moored overnight" width="100%">
+  <img src="assets/mooring-readme-header.png" alt="Mooring — your terminals and their agents, moored overnight" width="100%">
 </p>
 
 **Mooring** is a small Windows terminal for people who run several AI coding agents at once
@@ -10,7 +10,7 @@ night; in the morning every tab comes back in its folder with its agent's exact 
 No AI inside the app, no account, about 6 MB.
 
 <p align="center">
-  <img src="docs/brand/mooring-mock.png" alt="Mooring with a Claude Code tab and a Codex tab side by side" width="100%">
+  <img src="assets/mooring-mock.png" alt="Mooring with a Claude Code tab and a Codex tab side by side" width="100%">
 </p>
 
 ## What it does
@@ -87,11 +87,10 @@ of memory.
 ## Project layout
 
 ```
+assets/         README screenshots and header art
 src/            UI: main.js (tabs, split, sidebar), themes, i18n (src/locales/*.json), search, links
 src-tauri/      Rust: PTYs (portable-pty / ConPTY), state, clipboard, agent context
 agent-tabs/     session memory and resume (Python, bash, PowerShell) + its own locales
-docs/brand/     logo, icons and README art (build_brand.py, build_mock.py)
-docs/planning/  what was considered and left for later
 ```
 
 Adding a UI language: copy `src/locales/en.json` to `<code>.json`, translate the values, rebuild.

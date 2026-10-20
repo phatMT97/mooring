@@ -1,5 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <!-- C: a harbour (ring open at its mouth) with the terminal cursor docked inside for the night -->
-  <path d="M172.00 55.79 A88 88 0 1 1 84.00 55.79" fill="none" stroke="#000" stroke-width="30" stroke-linecap="round"/>
-  <rect x="92" y="150" width="72" height="30" rx="11" fill="#000"/>
-</svg>

@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <!-- A: the prompt's cursor is a mooring line, slack between two cleats -->
-  <path d="M44 70 L104 116 L44 162" fill="none" stroke="#000" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M132 168 Q 172 206 212 168" fill="none" stroke="#000" stroke-width="22" stroke-linecap="round"/>
-  <circle cx="132" cy="168" r="17" fill="#000"/>
-  <circle cx="212" cy="168" r="17" fill="#000"/>
-</svg>

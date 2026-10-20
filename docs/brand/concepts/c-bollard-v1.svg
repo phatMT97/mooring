@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <!-- C: a bollard whose cap is a terminal window; a line looped round its neck -->
-  <path fill="#000" fill-rule="evenodd" d="M76 56 H180 A28 28 0 0 1 208 84 V100 A28 28 0 0 1 180 128 H76 A28 28 0 0 1 48 100 V84 A28 28 0 0 1 76 56 Z M78 84 L94 92 L78 100 Z"/>
-  <rect x="100" y="128" width="56" height="72" fill="#000"/>
-  <rect x="76" y="196" width="104" height="18" rx="9" fill="#000"/>
-  <path d="M100 148 C 60 150, 60 178, 100 176 M156 148 C 196 150, 196 178, 156 176" fill="none" stroke="#000" stroke-width="14" stroke-linecap="round"/>
-  <rect x="100" y="158" width="56" height="8" fill="#fff"/>
-</svg>
