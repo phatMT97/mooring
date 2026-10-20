@@ -1,0 +1,6 @@
+[Unit]
+Description=Record live agent session ids per terminal tab
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/agent-tabs snapshot

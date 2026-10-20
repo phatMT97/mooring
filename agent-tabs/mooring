@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Drive the Mooring window this shell runs in: for you, and for the agents you run here.
+
+  mooring tabs                               list tabs (id, repo, title, status, agent?)
+  mooring whoami                             this tab
+  mooring new [--wsl|--ps] [--cwd DIR] [--right|--down] [--focus] [-- COMMAND...]
+                                             open a tab (or a split beside this one) and run COMMAND
+  mooring send TAB TEXT [--enter] [--force]  type TEXT into TAB (paste; --enter submits it)
+  mooring read TAB [-n LINES] [--chat|--last] what TAB shows, its agent's recent chat (JSON), or
+                                             just the agent's whole answer to the latest prompt
+  mooring wait TAB [--timeout S]             block until the agent in TAB has finished (waits for it
+                                             to start first); run it in the background
+  mooring focus TAB | close TAB [--force]
+  mooring split TAB [--down] | unsplit       put TAB beside this one / back to one tab
+  mooring notify TEXT                        toast + flag this tab for the user
+  mooring install-agents                     teach Claude Code and Codex about this command
+
+TAB is a tab id from `mooring tabs`, "self", or "other" (the other half of a split).
+Talks to the app through files in $MOORING_INBOX, which Mooring sets for its shells.
+"""
+import glob, json, os, sys, time, uuid
+
+TIMEOUT = 15
+
+
+def die(msg, code=1):
+    print(f"mooring: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def ask(action, timeout=TIMEOUT, **args):
+    inbox = os.environ.get("MOORING_INBOX")
+    if not inbox or not os.path.isdir(inbox):
+        die("not running inside Mooring (no MOORING_INBOX)", 2)
+    rid = uuid.uuid4().hex
+    req = os.path.join(inbox, f"{rid}.req.json")
+    with open(req + ".tmp", "w") as f:
+        json.dump({"action": action, "from": os.environ.get("TERMDECK_TAB"), **args}, f)
+    os.replace(req + ".tmp", req)
+    res = os.path.join(inbox, f"{rid}.res.json")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(res):
+            with open(res) as f:
+                reply = json.load(f)
+            os.remove(res)
+            if not reply.get("ok"):
+                die(reply.get("error", "failed"))
+            return reply.get("result")
+        time.sleep(0.05 if timeout <= TIMEOUT else 1)  # a long wait checks gently
+    try:
+        os.remove(req)
+    except OSError:
+        pass
+    die("Mooring did not answer (is the window open?)", 3)
+
+
+def flag(args, name):
+    if name in args:
+        args.remove(name)
+        return True
+    return False
+
+
+def option(args, name, default=None):
+    if name in args:
+        i = args.index(name)
+        if i + 1 >= len(args):
+            die(f"{name} needs a value")
+        value = args[i + 1]
+        del args[i:i + 2]
+        return value
+    return default
+
+
+def show(result):
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_tabs(_):
+    res = ask("tabs")
+    if not res["tabs"]:
+        print("(no tabs)")
+    for x in res["tabs"]:
+        mark = "*" if x["active"] else ("+" if x["visible"] else " ")
+        state = x["status"] + (" agent" if x["agent"] else "")
+        print(f"{mark}{x['id']:>3}  {x['shell']:<10} {(x['repo'] or '-'):<20} {state:<14} {x['title']}")
+    if res.get("split"):
+        print(f"\nsplit: {res['split']['ids'][0]} | {res['split']['ids'][1]} ({res['split']['dir']})")
+
+
+def cmd_new(args):
+    command = None
+    if "--" in args:
+        i = args.index("--")
+        command = " ".join(args[i + 1:])
+        del args[i:]
+    shell = "wsl" if flag(args, "--wsl") else "powershell" if flag(args, "--ps") else None
+    split = "right" if flag(args, "--right") else "down" if flag(args, "--down") else None
+    res = ask("new", shell=shell, cwd=option(args, "--cwd"), split=split, focus=flag(args, "--focus"),
+              command=command)
+    print(res["id"])
+
+
+def cmd_send(args):
+    enter, force = flag(args, "--enter"), flag(args, "--force")
+    if len(args) < 2:
+        die("usage: mooring send TAB TEXT [--enter] [--force]")
+    ask("send", tab=args[0], text=" ".join(args[1:]), enter=enter, force=force)
+
+
+def cmd_wait(args):
+    limit = int(option(args, "--timeout", 1800))
+    res = ask("wait", timeout=limit + 120, tab=args[0] if args else "other", timeout_s=limit)
+    print(f"tab {res['id']} · {res['status']} after {res['seconds']}s · {res['title']}")
+
+
+def cmd_read(args):
+    chat, last = flag(args, "--chat"), flag(args, "--last")
+    lines = option(args, "-n", 80)
+    res = ask("read", tab=args[0] if args else "other", lines=int(lines), chat=chat, last=last)
+    if last:
+        print(res["turns"][0]["text"] if res.get("turns") else "")
+    elif chat:
+        show(res)
+    else:
+        print(f"# tab {res['id']} · {res['repo'] or res['cwd']} · {res['title']} · {res['status']}")
+        print(res["text"])
+
+
+# ---- install-agents: tell Claude Code and Codex this command exists ------------------------------
+
+GUIDE = """Mooring is the terminal you are running in (Windows; WSL and PowerShell tabs, grouped by repo).
+The `mooring` command drives it. Use it when the user asks to open a tab or pane, run something
+beside you, hand work to another agent, or check what another tab / agent is doing.
+
+- `mooring tabs` lists tabs: id, repo, status (working / needs / idle), whether an agent runs there.
+- `mooring new --right -- claude "fix the flaky test in api/"` opens a split beside you and runs the
+  command in its shell (also `--down`, `--wsl`/`--ps`, `--cwd DIR`, `--focus`; without --right/--down
+  it opens a background tab). Prints the new tab id.
+- `mooring read TAB` prints what that tab shows (`-n 200` for more); `mooring read TAB --chat`
+  gives the recent turns of the claude/codex session there plus the path of its full transcript;
+  `mooring read TAB --last` prints just that agent's whole answer to its latest prompt.
+- `mooring wait TAB` blocks until the agent in TAB has finished (it first waits for it to start, so
+  it works right after `mooring new`). Run it as a background command and read `--last` when it
+  returns, instead of polling the tab in a loop.
+- `mooring send TAB "text" --enter` types into another tab (a shell command, or a prompt for the
+  agent there). It refuses while that agent is working unless `--force`; prefer waiting.
+- `mooring focus TAB`, `mooring close TAB`, `mooring split TAB [--down]`, `mooring unsplit`,
+  `mooring notify "done: …"` (shows a toast and flags your tab for the user).
+TAB is an id, `self`, or `other` (the other half of a split). Run commands for other tabs through
+`mooring new` / `mooring send`, not in your own shell. Read before you send, and don't type into a
+tab the user is using unless asked."""
+
+BEGIN, END = "<!-- mooring:begin -->", "<!-- mooring:end -->"
+
+
+def put_block(path, body):
+    """Insert or replace the marked Mooring block in a markdown file."""
+    text = open(path).read() if os.path.exists(path) else ""
+    block = f"{BEGIN}\n## Mooring (terminal)\n\n{body}\n{END}\n"
+    if BEGIN in text and END in text:
+        start, end = text.index(BEGIN), text.index(END) + len(END)
+        text = text[:start] + block.rstrip("\n") + text[end:]
+    else:
+        text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + block
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def cmd_install_agents(_):
+    home = os.path.expanduser("~")
+    skill = ("---\nname: mooring\ndescription: Drive the Mooring terminal this session runs in — list its tabs, "
+             "open a tab or split pane running a command (another Claude/Codex with a prompt, tests, a server), "
+             "type into another tab, read another tab's screen or agent chat, focus or close tabs. Use when the "
+             "user asks to open/split panes or tabs, run something beside you, hand work to another agent, or "
+             "check what another tab or session is doing.\n---\n\n# Mooring\n\n" + GUIDE + "\n")
+    # Claude Code: a user skill in every config dir (~/.claude, and CLAUDE_CONFIG_DIR variants)
+    for cfg in sorted(glob.glob(os.path.join(home, ".claude*"))):
+        if os.path.isdir(cfg) and os.path.exists(os.path.join(cfg, "settings.json")):
+            path = os.path.join(cfg, "skills", "mooring", "SKILL.md")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(skill)
+            print("claude:", path)
+    # Codex reads ~/.codex/AGENTS.md for every session
+    codex = os.path.join(os.environ.get("CODEX_HOME", os.path.join(home, ".codex")), "AGENTS.md")
+    if os.path.isdir(os.path.dirname(codex)):
+        put_block(codex, GUIDE)
+        print("codex: ", codex)
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    cmd, rest = args[0], args[1:]
+    simple = {"whoami": lambda a: show(ask("whoami")), "unsplit": lambda a: ask("unsplit"),
+              "focus": lambda a: show(ask("focus", tab=a[0] if a else "self")),
+              "close": lambda a: ask("close", tab=a[0] if a else die("which tab?"), force=flag(a, "--force")),
+              "split": lambda a: show(ask("split", tab=a[0] if a else "other", dir="down" if "--down" in a else "right")),
+              "notify": lambda a: ask("notify", text=" ".join(a))}
+    table = {"tabs": cmd_tabs, "new": cmd_new, "send": cmd_send, "read": cmd_read, "wait": cmd_wait,
+             "install-agents": cmd_install_agents, **simple}
+    if cmd not in table:
+        die(f"unknown command {cmd!r} (mooring --help)")
+    table[cmd](rest)
+
+
+if __name__ == "__main__":
+    main()

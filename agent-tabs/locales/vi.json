@@ -1,0 +1,11 @@
+{
+  "_name": "Tiếng Việt",
+  "resume_prompt": "↻ Mở lại {label} → {cmd}  (nhấn phím bất kỳ để huỷ)",
+  "cancelled": " — đã huỷ",
+  "leftover": "↻ Còn {n} session agent chờ khôi phục — gõ: agent-tabs  (hoặc agent-tabs open)",
+  "resuming": "↻ {label} → {cmd}",
+  "none_here": "Không có session nào chờ ở {dir}",
+  "none": "Không có session nào đang chờ khôi phục.",
+  "none_open": "Không có session nào đang chờ khôi phục (có thể các tab khác đã tự mở lại rồi).",
+  "waiting_here": "↻ Có {n} session agent đang chờ ở thư mục này — gõ agent-resume để mở lại"
+}

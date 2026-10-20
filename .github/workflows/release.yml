@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag name (e.g. v0.1.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Release (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri app
+        run: npx tauri build --no-bundle
+
+      - name: Package Release
+        shell: pwsh
+        run: |
+          $Tag = if ("${{ github.ref_type }}" -eq "tag") {
+            "${{ github.ref_name }}"
+          } elseif ("${{ inputs.tag_name }}" -ne "") {
+            "${{ inputs.tag_name }}"
+          } else {
+            "v0.1.0"
+          }
+          $Version = $Tag.TrimStart('v')
+
+          Write-Host "Packaging Mooring $Tag (v$Version)..."
+
+          # Find the built executable
+          $ExePath = ""
+          if (Test-Path "src-tauri/target/release/Mooring.exe") {
+            $ExePath = "src-tauri/target/release/Mooring.exe"
+          } elseif (Test-Path "src-tauri/target/release/termdeck.exe") {
+            $ExePath = "src-tauri/target/release/termdeck.exe"
+          } else {
+            $found = Get-ChildItem -Path "src-tauri/target/release" -Filter "*.exe" | Where-Object { $_.Name -notlike "*build*" -and $_.Name -notlike "*plugin*" } | Select-Object -First 1
+            if ($found) {
+              $ExePath = $found.FullName
+            } else {
+              throw "No executable found in src-tauri/target/release"
+            }
+          }
+
+          Write-Host "Found executable at $ExePath"
+          Copy-Item $ExePath -Destination "Mooring.exe"
+
+          # Create distribution zip with Mooring.exe and companion scripts
+          $PackageDir = "Mooring-$Tag-windows-x64"
+          New-Item -ItemType Directory -Path $PackageDir -Force | Out-Null
+          Copy-Item "Mooring.exe" -Destination "$PackageDir/"
+          Copy-Item -Recurse "agent-tabs" -Destination "$PackageDir/"
+          Copy-Item "README.md" -Destination "$PackageDir/"
+          if (Test-Path "deploy.sh") {
+            Copy-Item "deploy.sh" -Destination "$PackageDir/"
+          }
+
+          $ZipName = "Mooring-$Tag-windows-x64.zip"
+          Compress-Archive -Path "$PackageDir/*" -DestinationPath $ZipName -Force
+
+          # Checksums
+          $ExeHash = (Get-FileHash -Algorithm SHA256 "Mooring.exe").Hash.ToLower()
+          $ZipHash = (Get-FileHash -Algorithm SHA256 $ZipName).Hash.ToLower()
+          "$ExeHash  Mooring.exe`n$ZipHash  $ZipName" | Out-File -Encoding utf8 "checksums.txt"
+
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TAG=$Tag"
+          Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_VERSION=$Version"
+          Add-Content -Path $env:GITHUB_ENV -Value "ZIP_NAME=$ZipName"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Mooring ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          files: |
+            Mooring.exe
+            ${{ env.ZIP_NAME }}
+            checksums.txt

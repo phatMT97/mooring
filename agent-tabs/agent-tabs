@@ -1,0 +1,643 @@
+#!/usr/bin/env python3
+"""Remember which Claude/Codex/agy session runs in which shell, and resume it after WSL restarts.
+
+  agent-tabs                 list sessions waiting to be resumed
+  agent-tabs open [N,..]     reopen pending sessions in new Windows Terminal tabs
+  agent-tabs clear           forget all pending sessions
+  agent-tabs snapshot        record live session ids (run by the systemd timer)
+
+Internal, used by ~/.config/agent-tabs/agent-tabs.bash:
+  agent-tabs mark SHELL_PID LAUNCHER     agent-tabs claim CWD
+  agent-tabs msg KEY [name=value ...]    print a message in the user's language
+  agent-tabs context TAB [APP]           JSON digest of the agent running in termdeck tab TAB
+  agent-tabs waiting                     JSON list of sessions waiting (for Mooring's sidebar)
+  agent-tabs take SESSION | drop SESSION claim one to resume it (prints JSON cwd + cmd) / forget it
+
+Messages live in locales/<lang>.json next to this script (add a language by adding a file).
+Language: $AGENT_TABS_LANG, else $TERMDECK_LANG (set by termdeck), else $LC_ALL/$LANG, else English.
+"""
+import glob, json, os, shlex, shutil, signal, subprocess, sys, time
+
+STATE = os.path.expanduser("~/.local/state/agent-tabs")
+RUN, CLAIMED = os.path.join(STATE, "run"), os.path.join(STATE, "claimed")
+CODEX_HOME = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
+AGY_HOME = os.path.expanduser("~/.gemini/antigravity-cli")
+
+
+LOCALES = os.path.join(os.path.dirname(os.path.realpath(__file__)), "locales")
+
+
+def lang():
+    for var in ("AGENT_TABS_LANG", "TERMDECK_LANG", "LC_ALL", "LANG"):
+        code = os.environ.get(var, "").split(".")[0].split("_")[0].split("-")[0].lower()
+        if code and os.path.exists(os.path.join(LOCALES, f"{code}.json")):
+            return code
+    return "en"
+
+
+def msg(key, **values):
+    words = lambda code: load(os.path.join(LOCALES, f"{code}.json")) or {}
+    text = words(lang()).get(key) or words("en").get(key) or key
+    for k, v in values.items():
+        text = text.replace("{" + k + "}", str(v))
+    return text
+
+
+def boot_id():
+    with open("/proc/sys/kernel/random/boot_id") as f:
+        return f.read().strip()
+
+
+def load(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def markers():
+    for p in sorted(glob.glob(os.path.join(RUN, "*.json"))):
+        m = load(p)
+        if m:
+            yield p, m
+
+
+def alive(m):
+    return m.get("boot") == boot_id() and os.path.exists(f"/proc/{m['shell_pid']}")
+
+
+def left_behind(m):
+    """A shell from an earlier run of this same termdeck: its window is gone for good, even if
+    the shell (say, its agent still finishing up) hasn't exited yet. termdeck stamps each run."""
+    run = os.environ.get("TERMDECK_RUN")
+    return bool(run and m.get("termdeck_run") and m["termdeck_run"] != run
+                and m.get("termdeck_app") == os.environ.get("TERMDECK_APP"))
+
+
+def hang_up(shell_pid):
+    """End a left-behind shell and its agent, as closing its window would have, so the session
+    isn't open twice once resumed here."""
+    pids = [shell_pid] + descendants(shell_pid, children_map())
+    for sig, grace in ((signal.SIGHUP, 3), (signal.SIGKILL, 0)):
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+        deadline = time.time() + grace
+        while time.time() < deadline and any(running(pid) for pid in pids):
+            time.sleep(0.1)
+
+
+def running(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"  # a zombie is done, just not reaped
+    except (OSError, IndexError):
+        return False
+
+
+# ---- process inspection -------------------------------------------------
+
+def children_map():
+    kids = {}
+    for stat in glob.glob("/proc/[0-9]*/stat"):
+        try:
+            with open(stat) as f:
+                s = f.read()
+            pid = int(stat.split("/")[2])
+            ppid = int(s[s.rindex(")") + 2:].split()[1])
+        except (OSError, ValueError):
+            continue
+        kids.setdefault(ppid, []).append(pid)
+    return kids
+
+
+def descendants(pid, kids):
+    stack, out = [pid], []
+    while stack:
+        for c in kids.get(stack.pop(), []):
+            out.append(c)
+            stack.append(c)
+    return out
+
+
+def proc_env(pid):
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            return dict(kv.split("=", 1) for kv in f.read().decode(errors="ignore").split("\0") if "=" in kv)
+    except OSError:
+        return {}
+
+
+def proc_comm(pid):
+    try:
+        with open(f"/proc/{pid}/comm") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def claude_session(pid):
+    cfg = proc_env(pid).get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    info = load(os.path.join(cfg, "sessions", f"{pid}.json"))
+    if info and info.get("kind", "interactive") == "interactive":
+        return info.get("sessionId"), info.get("cwd")
+    return None, None
+
+
+def codex_meta(path):
+    try:
+        with open(path) as f:
+            return json.loads(f.readline()).get("payload", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def codex_session(pid):
+    try:
+        fds = [os.readlink(p) for p in glob.glob(f"/proc/{pid}/fd/*")]
+    except OSError:
+        fds = []
+    for target in fds:
+        if "/sessions/" in target and os.path.basename(target).startswith("rollout-"):
+            meta = codex_meta(target)
+            return meta.get("id"), meta.get("cwd")
+    return None, None
+
+
+def agy_session(pid):
+    try:
+        fds = [os.readlink(p) for p in glob.glob(f"/proc/{pid}/fd/*")]
+    except OSError:
+        fds = []
+    for target in fds:
+        if target.startswith(os.path.join(AGY_HOME, "conversations")) and target.endswith(".db"):
+            return os.path.basename(target)[:-3], None
+    return None, None
+
+
+def live_session(shell_pid, kids):
+    for pid in descendants(shell_pid, kids):
+        comm = proc_comm(pid)
+        if comm == "claude":
+            sid, cwd = claude_session(pid)
+            if sid:
+                return "claude", sid, cwd
+        elif comm == "codex":
+            sid, cwd = codex_session(pid)
+            if sid:
+                return "codex", sid, cwd
+        elif comm == "agy":
+            sid, cwd = agy_session(pid)
+            if sid:
+                return "agy", sid, cwd
+    return None, None, None
+
+
+# ---- fallback when the snapshot never saw the session id ------------------
+
+def guess_session(m, taken):
+    started = m.get("started", 0) - 5
+    if m["launcher"] == "codex":
+        files = glob.glob(os.path.join(CODEX_HOME, "sessions", "*", "*", "*", "rollout-*.jsonl"))
+        cands = []
+        for p in files:
+            if os.path.getmtime(p) < started:
+                continue
+            meta = codex_meta(p)
+            if meta.get("cwd") == m["cwd"] and meta.get("source") == "cli" and meta.get("id") not in taken:
+                cands.append((os.path.getmtime(p), "codex", meta.get("id")))
+    elif m["launcher"] == "agy":
+        last = load(os.path.join(AGY_HOME, "cache", "last_conversations.json")) or {}
+        sid = last.get(m["cwd"])
+        db = os.path.join(AGY_HOME, "conversations", f"{sid}.db")
+        cands = [(0, "agy", sid)] if sid and sid not in taken and os.path.exists(db) \
+            and os.path.getmtime(db) >= started else []
+    else:
+        slug = "".join(c if c.isalnum() else "-" for c in m["cwd"])
+        files = glob.glob(os.path.expanduser(f"~/.claude*/projects/{slug}/*.jsonl"))
+        cands = [(os.path.getmtime(p), "claude", os.path.basename(p)[:-6]) for p in files
+                 if os.path.getmtime(p) >= started and os.path.basename(p)[:-6] not in taken]
+    if cands:
+        _, tool, sid = max(cands)
+        return tool, sid
+    return None, None
+
+
+def claude_titles(sid, tail=None):
+    """(custom title, ai title) of a Claude session, the latest of each; a name the user gave
+    (/rename) beats the one Claude made up. tail: read only that many bytes from the end."""
+    custom = ai = None
+    for p in glob.glob(os.path.expanduser(f"~/.claude*/projects/*/{sid}.jsonl")):
+        with open(p, "rb") as f:
+            if tail:
+                f.seek(max(0, os.path.getsize(p) - tail))
+            for line in f.read().decode(errors="ignore").splitlines():
+                if '"custom-title"' in line or '"ai-title"' in line:
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    custom = d.get("customTitle") or custom
+                    ai = d.get("aiTitle") or ai
+    return custom, ai
+
+
+def title_for(tool, sid):
+    if tool == "claude":
+        custom, ai = claude_titles(sid)
+        return custom or ai
+    elif tool == "codex":
+        idx = os.path.join(CODEX_HOME, "session_index.jsonl")
+        title = None
+        if os.path.exists(idx):
+            with open(idx, errors="ignore") as f:
+                for line in f:
+                    if sid in line:
+                        try:
+                            title = json.loads(line).get("thread_name") or title
+                        except ValueError:
+                            pass
+        return title
+    return None
+
+
+# ---- reading another tab's conversation (termdeck: drag a tab into a chat) ----------------
+
+def termdeck_shell(tab, app):
+    """The shell termdeck started for tab `tab` of app `app` (its TERMDECK_* env says so)."""
+    found = {}
+    for env_path in glob.glob("/proc/[0-9]*/environ"):
+        pid = int(env_path.split("/")[2])
+        env = proc_env(pid)
+        if env.get("TERMDECK_TAB") == str(tab) and env.get("TERMDECK_APP", app) == app:
+            found[pid] = env.get("TERMDECK_APP") == app
+    if not found:
+        return None
+    kids = children_map()
+    under = {c for p in found for c in descendants(p, kids)}
+    roots = [p for p in found if p not in under]
+    # shells from before TERMDECK_APP existed carry no app: trust them only when unambiguous
+    exact = [p for p in roots if found[p]]
+    return min(exact) if exact else (roots[0] if len(roots) == 1 else None)
+
+
+SKIP_PROMPT = ("<command-", "<local-command", "<system-reminder", "<task-notification", "<environment_context",
+               "<user_instructions", "# AGENTS.md", "[Request interrupted", "Caveat:")
+
+
+def claude_turns(path):
+    for line in open(path, errors="ignore"):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("type") not in ("user", "assistant") or d.get("isMeta") or d.get("isSidechain"):
+            continue
+        content = (d.get("message") or {}).get("content")
+        if isinstance(content, str):
+            text = content
+        else:
+            text = "\n".join(b.get("text", "") for b in content or [] if b.get("type") == "text")
+        if text.strip():
+            yield d["type"], text
+
+
+def codex_turns(path):
+    for line in open(path, errors="ignore"):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        p = d.get("payload") or {}
+        if d.get("type") == "response_item" and p.get("type") == "message" and p.get("role") in ("user", "assistant"):
+            text = "\n".join(b.get("text", "") for b in p.get("content") or [] if "text" in b)
+            if text.strip():
+                yield p["role"], text
+
+
+def cmd_context(tab, app="", turns=8, per_turn=1500, total=12000, last=False):
+    """last=True: just the agent's whole answer to the latest prompt (all its text since then)."""
+    shell = termdeck_shell(tab, app)
+    tool, sid, cwd = live_session(shell, children_map()) if shell else (None, None, None)
+    path = None
+    if tool == "claude":
+        path = next(iter(glob.glob(os.path.expanduser(f"~/.claude*/projects/*/{sid}.jsonl"))), None)
+        convo = claude_turns(path) if path else []
+    elif tool == "codex":
+        path = next(iter(glob.glob(os.path.join(CODEX_HOME, "sessions", "*", "*", "*", f"rollout-*{sid}.jsonl"))), None)
+        convo = codex_turns(path) if path else []
+    if not path:
+        sys.exit(3)  # no agent we can read here: termdeck falls back to the terminal's text
+    picked = [(role, text) for role, text in convo if not text.lstrip().startswith(SKIP_PROMPT)]
+    if last:
+        since = max((i for i, (role, _) in enumerate(picked) if role == "user"), default=-1)
+        answer = "\n\n".join(text.strip() for _, text in picked[since + 1:])
+        picked, turns, per_turn, total = [("assistant", answer)], 1, 40000, 40000
+    picked = picked[-turns:]
+    out, size = [], 0
+    for role, text in reversed(picked):  # newest first while budgeting, so the latest turns survive
+        text = text.strip()
+        if len(text) > per_turn:
+            text = text[:per_turn] + " …"
+        if size + len(text) > total:
+            break
+        out.insert(0, {"role": role, "text": text})
+        size += len(text)
+    print(json.dumps({"tool": tool, "session": sid, "cwd": cwd, "title": title_for(tool, sid),
+                      "transcript": path, "turns": out}, ensure_ascii=False))
+
+
+def resume_cmd(m):
+    if m["tool"] == "codex":
+        return f"{m['launcher']} resume {m['session_id']}"
+    if m["tool"] == "agy":
+        return f"{m['launcher']} --conversation {m['session_id']}"
+    return f"{m['launcher']} --resume {m['session_id']}"
+
+
+# ---- commands -----------------------------------------------------------
+
+def cmd_mark(shell_pid, launcher):
+    os.makedirs(RUN, exist_ok=True)
+    save(os.path.join(RUN, f"{shell_pid}.json"), {
+        "shell_pid": int(shell_pid), "launcher": launcher, "cwd": os.getcwd(),
+        "boot": boot_id(), "started": time.time(), "wt_session": os.environ.get("WT_SESSION"),
+        "termdeck_app": os.environ.get("TERMDECK_APP"), "termdeck_run": os.environ.get("TERMDECK_RUN"),
+        "termdeck_tab": os.environ.get("TERMDECK_TAB")})
+
+
+def cmd_snapshot():
+    kids = children_map()
+    for path, m in markers():
+        if not alive(m):
+            continue
+        tool, sid, cwd = live_session(m["shell_pid"], kids)
+        if sid and (sid != m.get("session_id") or not m.get("title")):
+            m.update(tool=tool, session_id=sid, cwd=cwd or m["cwd"], seen=time.time(), named=False)
+            m["title"] = title_for(tool, sid) or m.get("title")
+            save(path, m)
+        elif sid and tool == "claude":
+            # follow a /rename (or a better auto title) without rereading the whole transcript
+            custom, ai = claude_titles(sid, tail=256 * 1024)
+            title = custom or (None if m.get("named") else ai)
+            if title and title != m.get("title"):
+                m.update(title=title, named=bool(custom) or m.get("named", False))
+                save(path, m)
+
+
+def live_ids(skip=()):
+    """Session ids of every agent process running now, tracked by a marker or not."""
+    ids = set()
+    for comm_path in glob.glob("/proc/[0-9]*/comm"):
+        pid = comm_path.split("/")[2]
+        if int(pid) in skip:
+            continue
+        lookup = {"claude": claude_session, "codex": codex_session, "agy": agy_session}.get(proc_comm(pid))
+        if lookup:
+            ids.add(lookup(pid)[0])
+    ids.discard(None)
+    return ids
+
+
+STALE_DAYS = 7  # a session nobody resumed for this long is forgotten (the agent's own history keeps it)
+
+
+def pending():
+    """Markers whose shell died while the agent was still running."""
+    rows = []
+    for path, m in markers():
+        if not alive(m) and time.time() - max(m.get("started", 0), m.get("seen", 0)) > STALE_DAYS * 86400:
+            os.remove(path)
+        else:
+            rows.append((path, m))
+    # agents in left-behind shells are as good as cut off: they don't count as running elsewhere
+    behind = [m["shell_pid"] for _, m in rows if alive(m) and left_behind(m)]
+    kids = children_map() if behind else {}
+    out, taken = [], live_ids({p for b in behind for p in [b] + descendants(b, kids)})
+    for path, m in sorted(rows, key=lambda r: r[1].get("started", 0), reverse=True):
+        if alive(m) and not left_behind(m):
+            taken.add(m.get("session_id"))
+        elif m.get("session_id") in taken:
+            os.remove(path)  # already running elsewhere, or a newer marker has it
+        else:
+            out.append((path, m))
+            taken.add(m.get("session_id"))
+    out.reverse()
+    for path, m in out:
+        if not m.get("session_id"):
+            m["tool"], m["session_id"] = guess_session(m, taken)
+            if m["session_id"]:
+                m["title"] = title_for(m["tool"], m["session_id"])
+        taken.add(m.get("session_id"))
+    for path, m in out:
+        if m.get("tool") == "claude" and not glob.glob(os.path.expanduser(f"~/.claude*/projects/*/{m['session_id']}.jsonl")):
+            m["session_id"] = None  # opened but never used: no transcript to resume
+        if not m.get("session_id"):
+            os.remove(path)  # nothing to resume
+    return [(p, m) for p, m in out if m.get("session_id")]
+
+
+def take(path):
+    """Atomically claim a marker so two restored tabs never resume the same session."""
+    os.makedirs(CLAIMED, exist_ok=True)
+    dest = os.path.join(CLAIMED, os.path.basename(path))
+    try:
+        os.rename(path, dest)
+    except OSError:
+        return False
+    m = load(dest) or {}
+    os.remove(dest)
+    if m.get("shell_pid") and alive(m) and left_behind(m):
+        hang_up(m["shell_pid"])
+    return True
+
+
+def orphaned(pid):
+    """A shell whose terminal is gone (WSL relay exited) but which hasn't died yet: re-parented to init."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            s = f.read()
+        ppid = int(s[s.rindex(")") + 2:].split()[1])
+    except (OSError, ValueError):
+        return False
+    # live WSL shells hang off "Relay(<pid>)"; once the terminal closes the relay exits and the shell
+    # is re-parented to SessionLeader / init-systemd / systemd
+    return ppid == 1 or proc_comm(ppid).startswith(("SessionLeader", "init", "systemd"))
+
+
+def dying_here(cwd):
+    """Markers for this folder whose old shell is still shutting down after its terminal closed
+    (e.g. its agent was mid-task): they become claimable a few seconds later."""
+    return [m for _, m in markers() if m["cwd"] == cwd and alive(m) and orphaned(m["shell_pid"])]
+
+
+def mine(m):
+    """The marker was left by this very termdeck tab (same app, same tab id) before a restart."""
+    tab = os.environ.get("TERMDECK_TAB")
+    return bool(tab and m.get("termdeck_tab") == tab and m.get("termdeck_app") == os.environ.get("TERMDECK_APP"))
+
+
+def claimable(m):
+    """A restored termdeck tab takes back its own session, never another tab's: each tab keeps
+    the colour and place it had. Sessions from tabs that weren't reopened stay queued for
+    `agent-resume`. Outside termdeck, or when asked by hand, any session of the folder will do."""
+    if not os.environ.get("TERMDECK_TAB") or os.environ.get("AGENT_TABS_NO_WAIT"):
+        return True
+    owner = m.get("termdeck_tab")
+    return mine(m) or not owner or m.get("termdeck_app") != os.environ.get("TERMDECK_APP")
+
+
+def cmd_claim(cwd):
+    # Only tabs reopened at launch resume on their own. A tab opened by hand in termdeck says what
+    # waits here instead (`agent-resume`, which sets AGENT_TABS_NO_WAIT, does take one).
+    if os.environ.get("TERMDECK_TAB") and not os.environ.get("TERMDECK_RESTORING") \
+            and not os.environ.get("AGENT_TABS_NO_WAIT"):
+        rows = pending()
+        here = sum(m["cwd"] == cwd for _, m in rows)
+        if here:
+            print(f"H\t{here}")
+        elif rows:
+            print(f"N\t{len(rows)}")
+        return
+    deadline = time.time() + 15
+    while True:
+        rows = pending()
+        for path, m in sorted(rows, key=lambda r: (not mine(r[1]), r[1].get("started", 0))):
+            if m["cwd"] == cwd and claimable(m) and take(path):
+                label = " ".join((m.get("title") or m["session_id"][:8]).split())
+                print(f"R\t{label}\t{resume_cmd(m)}")
+                return
+        if not dying_here(cwd) or time.time() > deadline:
+            break
+        time.sleep(0.5)
+    # Restored tabs start together: give the others a few seconds to claim theirs
+    # before telling this tab that sessions are left over. A tab opened by hand doesn't wait:
+    # termdeck marks the tabs it restores; elsewhere (Windows Terminal) we can't tell, so wait.
+    restoring = not os.environ.get("TERMDECK_TAB") or os.environ.get("TERMDECK_RESTORING")
+    deadline = time.time() + (8 if restoring and not os.environ.get("AGENT_TABS_NO_WAIT") else 0)
+    while rows and time.time() < deadline:
+        time.sleep(1)
+        rows = pending()
+    if rows:
+        print(f"N\t{len(rows)}")
+
+
+def cmd_list():
+    rows = pending()
+    if not rows:
+        print(msg("none"))
+        return rows
+    home = os.path.expanduser("~")
+    for i, (_, m) in enumerate(rows, 1):
+        print(f"{i:>2}. [{m['tool']}] {m['cwd'].replace(home, '~')}  {m.get('title') or ''}")
+        print(f"    cd {shlex.quote(m['cwd'])} && {resume_cmd(m)}")
+    return rows
+
+
+def cmd_waiting():
+    print(json.dumps([{"session": m["session_id"], "tool": m["tool"], "cwd": m["cwd"], "title": m.get("title"),
+                       "cmd": resume_cmd(m), "started": m.get("started")} for _, m in pending()], ensure_ascii=False))
+
+
+def cmd_take(session, drop=False):
+    for path, m in pending():
+        if m["session_id"] == session and take(path):
+            if not drop:
+                print(json.dumps({"cwd": m["cwd"], "cmd": resume_cmd(m)}, ensure_ascii=False))
+            return
+    sys.exit(3)  # gone meanwhile (resumed elsewhere, or dropped)
+
+
+def wsl_profile(distro):
+    """GUID of the Windows Terminal profile that launches this distro, for the tab's look."""
+    wt = shutil.which("wt.exe") or ""  # .../Users/<me>/AppData/Local/Microsoft/WindowsApps/wt.exe
+    local = wt.split("/Microsoft/WindowsApps/")[0]
+    settings = glob.glob(f"{local}/Packages/Microsoft.WindowsTerminal_*/LocalState/settings.json")
+    for path in settings:
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                profiles = json.load(f)["profiles"]["list"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        for p in profiles:
+            if distro in (p.get("commandline") or "") or p.get("name") == distro:
+                return p.get("guid")
+    return None
+
+
+def open_tab(cwd):
+    """Open a plain shell tab in cwd; its .bashrc claims and resumes the pending session there.
+
+    Only "wsl.exe --cd <dir>" goes on the tab's command line, because Windows Terminal saves
+    that line in its layout and re-runs it on every restore."""
+    distro = os.environ.get("WSL_DISTRO_NAME", "Ubuntu")
+    args = ["wt.exe", "-w", "0", "new-tab"]
+    guid = wsl_profile(distro)
+    if guid:
+        args += ["-p", guid]
+    subprocess.Popen(args + ["wsl.exe", "-d", distro, "--cd", cwd])
+    time.sleep(0.5)  # wt drops tabs when spawned too fast
+
+
+def cmd_open(which):
+    rows = pending()
+    if which:
+        rows = [rows[int(x) - 1] for x in which.split(",")]
+    if not rows:
+        print(msg("none_open"))
+    for _, m in rows:
+        open_tab(m["cwd"])
+
+
+def cmd_add(launcher, tool, sid, cwd, title=None):
+    """Queue a session for resume as if its tab had been cut off (used by cc-recent --open)."""
+    os.makedirs(RUN, exist_ok=True)
+    save(os.path.join(RUN, f"manual-{sid}.json"), {
+        "shell_pid": 0, "launcher": launcher, "cwd": cwd, "boot": "manual", "started": time.time(),
+        "tool": tool, "session_id": sid, "title": title})
+
+
+def main():
+    a = sys.argv[1:]
+    cmd = a[0] if a else "list"
+    if cmd == "mark":
+        cmd_mark(a[1], a[2])
+    elif cmd == "snapshot":
+        cmd_snapshot()
+    elif cmd == "claim":
+        cmd_claim(a[1])
+    elif cmd == "add":
+        cmd_add(*a[1:6])
+    elif cmd == "tab":
+        open_tab(a[1])
+    elif cmd == "open":
+        cmd_open(a[1] if len(a) > 1 else None)
+    elif cmd == "clear":
+        for path, _ in pending():
+            take(path)
+    elif cmd == "list":
+        cmd_list()
+    elif cmd == "waiting":
+        cmd_waiting()
+    elif cmd in ("take", "drop"):
+        cmd_take(a[1], drop=cmd == "drop")
+    elif cmd == "context":
+        cmd_context(a[1], a[2] if len(a) > 2 and a[2] != "--last" else "", last="--last" in a)
+    elif cmd == "msg":
+        print(msg(a[1], **dict(kv.split("=", 1) for kv in a[2:])))
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main()

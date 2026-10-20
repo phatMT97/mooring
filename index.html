@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Mooring</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <aside id="sidebar">
+      <div id="pane">
+        <div id="topbar">
+          <button id="toggle" class="icon-btn" data-i18n-label="sidebar.toggle"><i data-icon="panel"></i></button>
+          <button id="theme-btn" class="icon-btn" data-i18n-label="appearance"><i data-icon="palette"></i></button>
+          <button id="keys-btn" class="icon-btn" data-i18n-label="shortcuts.button"><i data-icon="keyboard"></i></button>
+          <button id="rail-new" class="icon-btn" data-i18n-label="tab.newSame"><i data-icon="plus"></i></button>
+          <div id="new-buttons">
+            <button data-shell="wsl" data-i18n-label="tab.newWsl"><i data-icon="plus"></i><span>WSL</span></button>
+            <button data-shell="powershell" data-i18n-label="tab.newPs"><i data-icon="plus"></i><span>PS</span></button>
+          </div>
+        </div>
+        <nav id="groups"></nav>
+        <section id="waiting" hidden></section>
+      </div>
+    </aside>
+    <main>
+      <header id="header"><span id="header-repo"></span><span id="header-cwd"></span>
+        <span id="header-actions">
+          <button id="hb-search" class="icon-btn sm" data-i18n-label="search.open"><i data-icon="search"></i></button>
+          <button id="hb-split-right" class="icon-btn sm" data-i18n-label="split.right"><i data-icon="splitRight"></i></button>
+          <button id="hb-split-down" class="icon-btn sm" data-i18n-label="split.down"><i data-icon="splitDown"></i></button>
+          <button id="hb-rotate" class="icon-btn sm" data-i18n-label="split.rotate"><i data-icon="splitDown"></i><i data-icon="splitRight"></i></button>
+          <button id="hb-unsplit" class="icon-btn sm" data-i18n-label="split.off"><i data-icon="unsplit"></i></button>
+        </span>
+      </header>
+      <div id="terminals"><div id="divider" data-i18n-label="split.divider"></div></div>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

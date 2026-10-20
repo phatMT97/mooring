@@ -1,0 +1,11 @@
+{
+  "_name": "English",
+  "resume_prompt": "↻ Reopening {label} → {cmd}  (press any key to cancel)",
+  "cancelled": " — cancelled",
+  "leftover": "↻ {n} agent session(s) waiting to resume — type: agent-tabs  (or agent-tabs open)",
+  "resuming": "↻ {label} → {cmd}",
+  "none_here": "No session waiting in {dir}",
+  "none": "No sessions waiting to resume.",
+  "none_open": "No sessions waiting to resume (other tabs may have reopened them already).",
+  "waiting_here": "↻ {n} agent session(s) waiting in this folder — type agent-resume to reopen"
+}
