@@ -94,3 +94,7 @@ agent-tabs/     session memory and resume (Python, bash, PowerShell) + its own l
 ```
 
 Adding a UI language: copy `src/locales/en.json` to `<code>.json`, translate the values, rebuild.
+
+## License
+
+[MIT](LICENSE) © 2026 PhatMT

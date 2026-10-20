@@ -2,6 +2,7 @@
 name = "termdeck"
 version = "0.1.0"
 description = "Lightweight terminal deck for WSL + PowerShell agent sessions"
+license = "MIT"
 edition = "2021"
 
 [lib]
