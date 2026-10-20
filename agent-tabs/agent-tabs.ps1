@@ -1,4 +1,4 @@
-﻿# agent-tabs (PowerShell side), the counterpart of ~/.config/agent-tabs/agent-tabs.bash in WSL:
+# agent-tabs (PowerShell side), the counterpart of ~/.config/agent-tabs/agent-tabs.bash in WSL:
 #  - tints the whole background per git repo (OSC 11) so torn-off windows are easy to tell apart,
 #  - reports the cwd to Windows Terminal (OSC 9;9) so restored tabs reopen in the same folder,
 #  - remembers which claude/agy session runs in this tab and auto-resumes it after a shutdown.
@@ -88,13 +88,16 @@ if ($global:AgentTabsClaudeExe) {
     }
 }
 
-if (Get-Command agy.exe -ErrorAction SilentlyContinue) {
+$global:AgentTabsAgyExe = @("$env:LOCALAPPDATA\agy\bin\agy.exe", 'agy.exe', 'agy') |
+    Where-Object { Get-Command $_ -ErrorAction SilentlyContinue } | Select-Object -First 1
+
+if ($global:AgentTabsAgyExe) {
     function global:agy {
         $a = @($args)
         $sid = $null
         $i = [Array]::IndexOf($a, '--conversation')
         if ($i -ge 0 -and $i + 1 -lt $a.Count) { $sid = [string]$a[$i + 1] }
-        Invoke-AgentTabsTracked 'agy' 'agy' 'agy.exe' $a $sid
+        Invoke-AgentTabsTracked 'agy' 'agy' $global:AgentTabsAgyExe $a $sid
     }
 }
 
@@ -104,9 +107,17 @@ function global:Resolve-AgentTabsSession($m) {
     if ($m.tool -eq 'agy') {
         $last = Join-Path $env:USERPROFILE '.gemini\antigravity-cli\cache\last_conversations.json'
         if (Test-Path -LiteralPath $last) {
-            $sid = (Get-Content -Raw -LiteralPath $last | ConvertFrom-Json).($m.cwd)
-            $db = Join-Path $env:USERPROFILE ".gemini\antigravity-cli\conversations\$sid.db"
-            if ($sid -and (Test-Path -LiteralPath $db) -and (Get-Item -LiteralPath $db).LastWriteTime -ge $since) { return $sid }
+            try {
+                $cache = Get-Content -Raw -LiteralPath $last | ConvertFrom-Json
+                $normCwd = $m.cwd.Replace('/', '\').TrimEnd('\')
+                foreach ($entry in $cache.PSObject.Properties) {
+                    if ($entry.Name.Replace('/', '\').TrimEnd('\') -ieq $normCwd) {
+                        $sid = [string]$entry.Value
+                        $db = Join-Path $env:USERPROFILE ".gemini\antigravity-cli\conversations\$sid.db"
+                        if ($sid -and (Test-Path -LiteralPath $db)) { return $sid }
+                    }
+                }
+            } catch {}
         }
         return $null
     }
@@ -133,9 +144,10 @@ function global:Get-AgentTabsPending {
             $m.session_id = $null  # opened but never used: nothing to resume
         }
         if ($m.session_id -and $null -eq $running) {
-            $running = (Get-CimInstance Win32_Process -Filter "Name='claude.exe' OR Name='agy.exe'").CommandLine -join "`n"
+            $procs = @(Get-CimInstance Win32_Process -Filter "Name='claude.exe' OR Name='agy.exe'" -ErrorAction SilentlyContinue)
+            $running = ($procs | ForEach-Object { $_.CommandLine }) -join "`n"
         }
-        if (-not $m.session_id -or $running.Contains($m.session_id)) {
+        if (-not $m.session_id -or ($running -and $running.Contains($m.session_id))) {
             Remove-Item -LiteralPath $file.FullName -ErrorAction SilentlyContinue
             continue
         }
@@ -146,8 +158,26 @@ function global:Get-AgentTabsPending {
 }
 
 function global:Get-AgentTabsResumeCommand($m) {
-    if ($m.tool -eq 'agy') { return "agy --conversation $($m.session_id)" }
+    if ($m.tool -eq 'agy') { return "agy --conversation $($m.session_id) --dangerously-skip-permissions" }
     return "claude --resume $($m.session_id)"
+}
+
+function global:agent-resume {
+    $here = $PWD.ProviderPath
+    $rows = @(Get-AgentTabsPending)
+    $claimed = $null
+    foreach ($m in ($rows | Sort-Object started)) {
+        if ($m.cwd -eq $here -and (Receive-AgentTabsMarker $m)) { $claimed = $m; break }
+    }
+    if ($claimed) {
+        $cmd = Get-AgentTabsResumeCommand $claimed
+        $label = if ($claimed.title) { $claimed.title } else { ([string]$claimed.session_id).Substring(0, 8) }
+        Write-Host (Get-AgentTabsText 'resuming' @{ label = $label; cmd = $cmd })
+        Invoke-Expression $cmd
+    } else {
+        Write-Host (Get-AgentTabsText 'none_here' @{ dir = $here })
+        global:agent-tabs
+    }
 }
 
 # Messages come from locales\<lang>.json beside this file (copied there by install.sh).

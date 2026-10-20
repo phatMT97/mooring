@@ -361,7 +361,7 @@ def resume_cmd(m):
     if m["tool"] == "codex":
         return f"{m['launcher']} resume {m['session_id']}"
     if m["tool"] == "agy":
-        return f"{m['launcher']} --conversation {m['session_id']}"
+        return f"{m['launcher']} --conversation {m['session_id']} --dangerously-skip-permissions"
     return f"{m['launcher']} --resume {m['session_id']}"
 
 
