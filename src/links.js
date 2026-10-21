@@ -2,6 +2,7 @@
 // Ctrl+Shift+Click to reveal the file in Explorer. Only paths that exist are linked.
 import { invoke } from "@tauri-apps/api/core";
 import { t } from "./i18n.js";
+import { attachWebLinks } from "./web-links.js";
 
 const URL_RE = /\bhttps?:\/\/[^\s"'<>`]+[^\s"'<>`.,;:!?)\]]/g;
 // paths with a separator (docs/a.md, ./x, ~/x, /abs, C:\x) or bare file names with an extension;
@@ -36,9 +37,15 @@ function hideTip() { tooltip?.remove(); }
 
 /**
  * @param term xterm Terminal
- * @param ctx  { shell: () => "wsl"|"powershell", cwd: () => string, toWin: (linuxPath) => string, home: () => Promise<string> }
+ * @param ctx  { shell, cwd, toWin, home, onError }
  */
 export function attachLinks(term, ctx) {
+  const webLinks = attachWebLinks(term, {
+    open: (url) => invoke("open_path", { path: url, reveal: false }),
+    hover: (e, url) => showTip(e, `${t("link.url")} · ${url}`),
+    leave: hideTip,
+    onError: ctx.onError,
+  });
   term.registerLinkProvider({
     async provideLinks(y, callback) {
       const line = term.buffer.active.getLine(y - 1)?.translateToString(true) ?? "";
@@ -47,7 +54,7 @@ export function attachLinks(term, ctx) {
 
       for (const m of line.matchAll(URL_RE)) {
         taken.push([m.index, m.index + m[0].length]);
-        found.push(makeLink(y, m.index, m[0], { url: m[0] }));
+        found.push(makeLink(y, m.index, m[0], { url: m[0] }, webLinks, ctx.onError));
       }
       const spaced = [...line.matchAll(SPACED_RE)].filter((m) => m[0].includes(" "));
       const candidates = [...spaced, ...line.matchAll(PATH_RE)].filter(
@@ -59,7 +66,7 @@ export function attachLinks(term, ctx) {
         const winPath = await resolve(raw, ctx);
         if (!winPath) return;
         const kind = await pathKind(winPath);
-        if (kind) paths.push({ m, link: makeLink(y, m.index, m[0], { path: winPath, kind }) });
+        if (kind) paths.push({ m, link: makeLink(y, m.index, m[0], { path: winPath, kind }, webLinks, ctx.onError) });
       }));
       // a spaced path that exists wins over the fragments of it the plain pattern also found
       for (const { m, link } of paths) {
@@ -72,7 +79,7 @@ export function attachLinks(term, ctx) {
   });
 }
 
-function makeLink(y, index, text, target) {
+function makeLink(y, index, text, target, webLinks, onError = () => {}) {
   const tip = target.url
     ? t("link.url")
     : target.kind === "dir"
@@ -83,11 +90,11 @@ function makeLink(y, index, text, target) {
     text,
     decorations: { pointerCursor: true, underline: true },
     activate(e) {
+      if (target.url) return webLinks.activate(e, target.url);
       if (!e.ctrlKey) return; // plain clicks stay text selection
-      const path = target.url ?? target.path;
-      invoke("open_path", { path, reveal: !target.url && e.shiftKey && target.kind !== "dir" });
+      return invoke("open_path", { path: target.path, reveal: e.shiftKey && target.kind !== "dir" }).catch(onError);
     },
-    hover: (e) => showTip(e, tip),
+    hover: (e) => target.url ? webLinks.hover(e, target.url) : showTip(e, tip),
     leave: hideTip,
   };
 }

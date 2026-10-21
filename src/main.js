@@ -141,6 +141,7 @@ async function openTab({ shell, cwd = "", title = "", pinned = false, color = nu
     cwd: () => tab.cwd,
     toWin: toWinPath,
     home: async () => (tab.shell === "wsl" ? (wslHome ??= await invoke("wsl_home", { distro: state.distro })) : null),
+    onError: (e) => toast(t("link.openFailed", { e: String(e?.message ?? e) })),
   });
 
   term.onData((data) => {

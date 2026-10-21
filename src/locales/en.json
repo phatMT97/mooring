@@ -27,6 +27,7 @@
   "term.exited": "shell exited — press Enter to restart it",
   "scrub.tip": "Drag up/down to scroll · double-click: jump to the bottom",
   "link.url": "Ctrl+Click: open link",
+  "link.openFailed": "Could not open link: {e}",
   "link.dir": "Ctrl+Click: open folder",
   "link.file": "Ctrl+Click: open file · Ctrl+Shift+Click: show in Explorer",
   "search.placeholder": "Find in terminal",

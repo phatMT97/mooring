@@ -27,6 +27,7 @@
   "term.exited": "shell đã thoát — nhấn Enter để mở lại",
   "scrub.tip": "Kéo lên/xuống để cuộn · nhấp đúp: xuống cuối",
   "link.url": "Ctrl+Click: mở link",
+  "link.openFailed": "Không mở được link: {e}",
   "link.dir": "Ctrl+Click: mở thư mục",
   "link.file": "Ctrl+Click: mở file · Ctrl+Shift+Click: mở trong Explorer",
   "search.placeholder": "Tìm trong terminal",
