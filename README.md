@@ -18,6 +18,10 @@ No AI inside the app, no account, about 6 MB.
 - **One window, both worlds.** WSL and PowerShell tabs side by side in a vertical sidebar, grouped
   by git repo. Each repo gets a colour (or pick one per tab), shown on the tab, the header and as a
   faint tint behind the terminal; the window title says `[WSL] repo · task` for Alt+Tab.
+  The top **+ WSL** / **+ PS** buttons open fresh tabs in their default folders. The **+** beside
+  each repo opens a terminal in its selected tab's current folder, including subfolders. For
+  another repo, it uses the tab selected most recently in that group. Linux paths open WSL;
+  Windows paths open PowerShell (including `/mnt/c/...` paths in WSL).
 - **Agent status per tab.** A light runs round a tab while its agent works; a yellow dot (and a
   flashing taskbar button) when it finished while you were looking elsewhere.
 - **Sessions survive a shutdown.** After a reboot Mooring asks which tabs to reopen; each one

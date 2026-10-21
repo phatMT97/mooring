@@ -129,6 +129,9 @@ body.sidebar-auto #pane.peek {
 .group-head .rule { width: 12px; height: 4px; border-radius: 2px; background: var(--tc); flex: none; }
 .group-head .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-head .count { font-weight: 500; color: var(--text-3); }
+.group-head .group-new { width: 22px; height: 22px; color: var(--text-3); }
+.group-head .group-new svg.i { width: 13px; height: 13px; }
+.group-head .group-new:hover, .group-head .group-new:focus-visible { color: var(--tc); background: var(--hover); }
 .group-head .needs {
   padding: 1px 8px;
   border-radius: 999px;

@@ -278,6 +278,7 @@ function activate(id) {
   const split = state.split;
   if (split && !split.ids.includes(id)) split.ids[Math.max(0, split.ids.indexOf(state.active))] = id;
   state.active = id;
+  tab.lastActive = Date.now();
   if (tab.status === "needs") tab.status = "idle";
   layout();
   requestAnimationFrame(() => { if (document.activeElement !== tab.term.textarea) tab.term.focus(); });
@@ -607,7 +608,7 @@ function openPalette() {
       hint: `${w.tool} · ${baseName(w.cwd)}`,
       run: () => resumeWaiting(w),
     })),
-    { label: t("tab.newWsl"), run: run(() => openTab({ shell: "wsl", cwd: tabs.get(state.active)?.shell === "wsl" ? tabs.get(state.active).cwd : "" })) },
+    { label: t("tab.newWsl"), run: run(() => openTab({ shell: "wsl" })) },
     { label: t("tab.newPs"), run: run(() => openTab({ shell: "powershell" })) },
     { label: t("agent.restart"), run: () => restartFromUi(tabs.get(state.active)) },
     ...launcherChoices(tabs.get(state.active)).map((launcher) => ({
@@ -734,6 +735,16 @@ async function dropWaiting(w) {
 
 function openSameAs(cur) {
   return openTab({ shell: cur?.shell ?? state.defaultShell, cwd: cur?.cwd ?? "" });
+}
+
+function repoTabOptions(tab) {
+  // Open beside the source tab's current directory, including any subfolder inside the repo.
+  const path = tab.cwd || tab.root;
+  const wsl = /^\\\\wsl(?:\.localhost|\$)\\/i.test(path)
+    || (path.startsWith("/") && !/^\/mnt\/[a-z](?:\/|$)/i.test(path));
+  return wsl
+    ? { shell: "wsl", cwd: toLinuxPath(path) ?? path }
+    : { shell: "powershell", cwd: path.startsWith("/") ? toWinPath(path) : path };
 }
 
 function searchActive() {
@@ -1004,12 +1015,12 @@ const PINNED = "\u0000pinned";
 const OTHER = "\u0000other";
 
 function groupName(key) {
-  return key === PINNED ? t("group.pinned") : key === OTHER ? t("group.other") : key;
+  return key === PINNED ? t("group.pinned") : key === OTHER ? t("group.other") : baseName(key);
 }
 
 function groupKey(tab) {
   if (tab.pinned) return PINNED;
-  return tab.root ? baseName(tab.root) : OTHER;
+  return tab.root || OTHER;
 }
 
 function orderedTabs() {
@@ -1146,6 +1157,18 @@ function render() {
       head.innerHTML = `${key === PINNED ? icons.pin : `<span class="rule"></span>`}<span class="name"></span><span class="count">${members.length}</span>${needs ? `<span class="needs">${t("group.needs", { n: needs })}</span>` : ""}`;
       head.style.setProperty("--tc", key === PINNED ? theme.ui.text2 : colorsFor(tab.root).accent);
       head.querySelector(".name").textContent = groupName(key);
+      if (key !== PINNED && key !== OTHER) {
+        const source = members.find((x) => x.id === state.active)
+          ?? members.reduce((a, b) => (b.lastActive ?? 0) > (a.lastActive ?? 0) ? b : a);
+        const target = repoTabOptions(source);
+        const add = document.createElement("button");
+        add.className = "icon-btn group-new";
+        add.innerHTML = icons.plus;
+        add.title = t("tab.newInRepo", { shell: target.shell === "wsl" ? "WSL" : "PowerShell", path: target.cwd });
+        add.setAttribute("aria-label", add.title);
+        add.onclick = (e) => { e.stopPropagation(); openTab(repoTabOptions(source)); };
+        head.append(add);
+      }
       if (key === PINNED) head.classList.add("pinned");
       wireDrag(head, { kind: "group", key });
       nav.append(head);
@@ -1264,7 +1287,7 @@ pane.addEventListener("mouseleave", () => {
   peekTimer = setTimeout(() => pane.classList.remove("peek"), 250);
 });
 document.getElementById("toggle").onclick = toggleSidebar;
-document.getElementById("rail-new").onclick = () => openSameAs(tabs.get(state.active));
+document.getElementById("rail-new").onclick = () => openTab({ shell: state.defaultShell });
 
 // ---- window geometry: remember size/position between runs ------------------
 
@@ -1351,11 +1374,7 @@ document.addEventListener("keydown", (e) => {
   if (k === "f5" || k === "f3" || k === "f7" || (e.ctrlKey && ["r", "p", "f", "g", "j", "u", "s", "o"].includes(k))) e.preventDefault();
 });
 document.querySelectorAll("#new-buttons button").forEach((b) => {
-  b.onclick = () => {
-    const cur = tabs.get(state.active);
-    const shell = b.dataset.shell;
-    openTab({ shell, cwd: cur && cur.shell === shell ? cur.cwd : "" });
-  };
+  b.onclick = () => openTab({ shell: b.dataset.shell });
 });
 
 document.getElementById("keys-btn").onclick = () => toggleShortcuts();
