@@ -6,7 +6,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, availableMonitors as getAvailableMonitors, currentMonitor } from "@tauri-apps/api/window";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
-import { getName } from "@tauri-apps/api/app";
+import { getName, getIdentifier } from "@tauri-apps/api/app";
 import { attachLinks } from "./links.js";
 import { attachScrub } from "./scrub.js";
 import { confirmDialog } from "./confirm.js";
@@ -18,6 +18,7 @@ import { attachSearch, openSearch } from "./search.js";
 import { toggleShortcuts } from "./shortcuts.js";
 import { togglePalette } from "./palette.js";
 import { t, setLang, defaultLang, translateDom } from "./i18n.js";
+import { createAgentRestarter } from "./agent-restart.js";
 
 // One accent per repo (sidebar, header, frame) and a faint tint of it behind the terminal,
 // both taken from the current theme (themes.js).
@@ -33,6 +34,7 @@ const DEFAULT_FONT_SIZE = 13;
 
 const win = getCurrentWindow();
 const appName = await getName().catch(() => "Mooring"); // "Mooring DEV" for the test build
+const appId = await getIdentifier();
 const state = { distro: "Ubuntu-24.04", active: null, nextId: 1, tabs: [], sidebar: "pinned", theme: "mocha", lang: null, defaultShell: "wsl", waitingOpen: false, fontSize: DEFAULT_FONT_SIZE, split: null, window: null };
 // state.split = { ids: [first, second], dir: "row" | "col", ratio } shows two tabs side by side
 // (row) or stacked (col); state.active is the one with focus.
@@ -142,6 +144,7 @@ async function openTab({ shell, cwd = "", title = "", pinned = false, color = nu
   });
 
   term.onData((data) => {
+    if (tab.restarting) return;
     if (data.includes("\r")) tab.atPrompt = false; // a command line was sent
     invoke("pty_write", { id, data }).catch(() => {});
   });
@@ -152,6 +155,8 @@ async function openTab({ shell, cwd = "", title = "", pinned = false, color = nu
   term.parser.registerOscHandler(9, (data) => {
     if (data.startsWith("9;")) {
       tab.atPrompt = true; // our hooks report the cwd as each prompt is drawn
+      tab.agentTool = tab.agentLauncher = null;
+      if (!tab.restarting) render();
       setCwd(tab, data.slice(2));
       runQueued(tab);
     }
@@ -187,9 +192,53 @@ async function spawn(tab) {
   }).catch((e) => tab.term.write(`\r\n[Mooring] ${t("term.spawnFailed", { e })}\r\n`));
 }
 
-// An agent lives in the tab while its title carries a status glyph (✳ idle, spinner while working).
+// Process identity covers all tools; title glyphs bridge the gap before the next process scan.
 function hasAgent(tab) {
-  return /^[^\p{L}\p{N}\s]/u.test(tab.title || "");
+  return !!tab.agentTool || (!tab.atPrompt && /^[^\p{L}\p{N}\s]/u.test(tab.title || ""));
+}
+
+async function refreshAgents() {
+  const json = await invoke("agent_tabs", { distro: state.distro, args: ["running", appId] }).catch(() => "");
+  if (!json) return; // an unavailable helper must not erase known identities
+  const live = new Map(JSON.parse(json).map((x) => [Number(x.tab), x]));
+  let changed = false;
+  for (const tab of tabs.values()) {
+    if (tab.shell !== "wsl" || tab.restarting) continue;
+    const agent = live.get(tab.id);
+    const launchers = agent?.launchers ?? (agent?.launcher ? [agent.launcher] : []);
+    if (tab.agentTool !== (agent?.tool ?? null) || tab.agentLauncher !== (agent?.launcher ?? null)
+      || JSON.stringify(tab.agentLaunchers) !== JSON.stringify(launchers)) {
+      tab.agentTool = agent?.tool ?? null;
+      tab.agentLauncher = agent?.launcher ?? null;
+      tab.agentLaunchers = launchers;
+      changed = true;
+    }
+  }
+  if (changed) render();
+}
+
+const { restartAgent, restartAll } = createAgentRestarter({
+  invoke, tabs, hasAgent, distro: () => state.distro, app: appId, t, toast,
+});
+
+async function restartFromUi(tab, launcher = null) {
+  try {
+    const out = await restartAgent(tab, false, launcher);
+    toast(t(out.skipped ? "agent.skippedBusy" : "agent.restarted"));
+  } catch (e) { toast(String(e?.message ?? e)); }
+  refreshAgents();
+}
+
+function agentLabel(tab) {
+  return tab.agentTool === "claude" ? (tab.agentLauncher || "claude") : tab.agentTool;
+}
+
+function launcherChoices(tab) {
+  return ["claude", "codex"].includes(tab?.agentTool) ? (tab.agentLaunchers ?? []) : [];
+}
+
+function launcherCommand(tab, launcher) {
+  return `${launcher} ${tab.agentTool === "codex" ? "resume" : "--resume"}`;
 }
 
 async function closeTab(id) {
@@ -468,6 +517,7 @@ function paste(tab) {
 
 function clipboardKeys(e, tab) {
   if (e.type !== "keydown") return true;
+  if (tab.restarting) return false;
   const k = e.key.toLowerCase();
   if (e.ctrlKey && k === "c" && tab.term.hasSelection()) {
     invoke("clipboard_write", { text: tab.term.getSelection() }).catch(() => {});
@@ -527,7 +577,7 @@ function handleShortcut(e) {
 
 // "Fix the login bug / WSL · ~/code/api / Working · 4 min"
 function tabTooltip(tab) {
-  const lines = [displayTitle(tab), `${shellName(tab)} · ${tab.cwd || "~"}`];
+  const lines = [displayTitle(tab), [shellName(tab), agentLabel(tab), tab.cwd || "~"].filter(Boolean).join(" · ")];
   const status = { working: "status.working", needs: "status.needs" }[tab.status]
     ?? (hasAgent(tab) ? "status.idle" : null);
   if (status) lines.push(t(status, { time: tab.since ? elapsed(Date.now() - tab.since) : "" }).replace(/ · $/, ""));
@@ -547,7 +597,7 @@ function openPalette() {
   togglePalette([
     ...orderedTabs().map((x) => ({
       label: tabHeading(x).full || displayTitle(x),
-      hint: `${shellName(x)}${x.status === "working" ? " · ◐" : x.status === "needs" ? " · ●" : ""}`,
+      hint: `${shellName(x)}${agentLabel(x) ? ` · ${agentLabel(x)}` : ""}${x.status === "working" ? " · ◐" : x.status === "needs" ? " · ●" : ""}`,
       color: x.colors.accent,
       run: () => activate(x.id),
     })),
@@ -558,6 +608,12 @@ function openPalette() {
     })),
     { label: t("tab.newWsl"), run: run(() => openTab({ shell: "wsl", cwd: tabs.get(state.active)?.shell === "wsl" ? tabs.get(state.active).cwd : "" })) },
     { label: t("tab.newPs"), run: run(() => openTab({ shell: "powershell" })) },
+    { label: t("agent.restart"), run: () => restartFromUi(tabs.get(state.active)) },
+    ...launcherChoices(tabs.get(state.active)).map((launcher) => ({
+      label: t("agent.restartWith", { cmd: launcherCommand(tabs.get(state.active), launcher) }),
+      run: () => restartFromUi(tabs.get(state.active), launcher),
+    })),
+    { label: t("agent.restartAll"), run: () => restartAll().then(refreshAgents).catch((e) => toast(String(e))) },
     { label: t("split.right"), run: run(() => splitNew("row")) },
     { label: t("split.down"), run: run(() => splitNew("col")) },
     ...(state.split ? [{ label: t("split.rotate"), run: run(rotateSplit) }, { label: t("split.off"), run: run(unsplit) }] : []),
@@ -658,7 +714,7 @@ async function resumeWaiting(w, refresh = true) {
   if (json) {
     const { cwd, cmd } = JSON.parse(json);
     const idle = orderedTabs().find((x) => x.shell === "wsl" && x.cwd === cwd && x.atPrompt && !hasAgent(x)
-      && x.status !== "exited" && !x.queued);
+      && x.status !== "exited" && !x.queued && !x.restarting);
     if (idle) {
       idle.atPrompt = false;
       invoke("pty_write", { id: idle.id, data: cmd + "\r" }).catch(() => {});
@@ -738,7 +794,7 @@ function screenText(from, name) {
 function tabInfo(x) {
   return {
     id: x.id, shell: x.shell, cwd: x.cwd, repo: x.root ? baseName(x.root) : null, title: displayTitle(x),
-    status: x.status, agent: hasAgent(x), active: x.id === state.active,
+    status: x.status, agent: hasAgent(x), tool: x.agentTool ?? null, launcher: x.agentLauncher ?? null, active: x.id === state.active,
     visible: x.el.classList.contains("active"),
   };
 }
@@ -763,12 +819,22 @@ function runQueued(tab) {
   if (!tab.queued) return;
   const command = tab.queued;
   tab.queued = null;
+  tab.atPrompt = false;
   invoke("pty_write", { id: tab.id, data: command + "\r" }).catch(() => {});
 }
 
 const waiters = new Set(); // `mooring wait` callbacks, run on every status change and tab close
 
 const AGENT_ACTIONS = {
+  async restart({ tab: ref, force, all, launcher }, from) {
+    if (all) return restartAll({ force, launcher, from });
+    const tab = tabRef(ref, from);
+    if (!tab) throw new Error("no such tab");
+    if (tab === from) return { id: tab.id, skipped: "self" };
+    const out = await restartAgent(tab, force, launcher);
+    toast(t(out.skipped ? "agent.skippedBusy" : "agent.restarted"));
+    return out;
+  },
   whoami(_, from) {
     if (!from) throw new Error("not run from a Mooring tab");
     return tabInfo(from);
@@ -795,9 +861,14 @@ const AGENT_ACTIONS = {
     const tab = tabRef(ref, from);
     if (!tab) throw new Error("no such tab");
     if (tab === from) throw new Error("that is your own tab");
+    if (tab.restarting) throw new Error(t("agent.alreadyRestarting"));
     if (tab.status === "working" && !force) throw new Error("its agent is working; wait, or pass --force");
     if (text) tab.term.paste(text);
-    if (enter) setTimeout(() => invoke("pty_write", { id: tab.id, data: "\r" }).catch(() => {}), 80);
+    if (enter) setTimeout(() => {
+      if (tab.restarting || tabs.get(tab.id) !== tab) return;
+      tab.atPrompt = false;
+      invoke("pty_write", { id: tab.id, data: "\r" }).catch(() => {});
+    }, 80);
     return { ok: true };
   },
 
@@ -1084,7 +1155,7 @@ function render() {
     row.innerHTML = `${avatarHtml(tab)}<span class="label"><span class="title"></span><span class="sub"></span></span><button class="pin" aria-label="${tab.pinned ? t("tab.unpin") : t("tab.pin")}" title="${tab.pinned ? t("tab.unpin") : t("tab.pin")}">${tab.pinned ? icons.pinOff : icons.pin}</button><button class="close" aria-label="${t("menu.close")}" title="${t("tab.close")}">${icons.x}</button>`;
     row.querySelector(".mono").textContent = monogram(tab.root ? baseName(tab.root) : displayTitle(tab));
     row.querySelector(".title").textContent = displayTitle(tab);
-    row.querySelector(".sub").textContent = `${shellName(tab)} · ${baseName(tab.cwd || "~")}`;
+    row.querySelector(".sub").textContent = [shellName(tab), agentLabel(tab), baseName(tab.cwd || "~")].filter(Boolean).join(" · ");
     row.onpointerenter = () => (row.title = tabTooltip(tab)); // built on hover so the time is current
     row.onclick = (e) => {
       if (suppressClick) return;
@@ -1103,6 +1174,11 @@ function render() {
         pinned: tab.pinned,
         canSplit: tab.id !== state.active && !state.split?.ids.includes(tab.id),
         onShare: tab.id !== state.active ? () => shareContext(tab, tabs.get(state.active)) : null,
+        onRestart: tab.shell === "wsl" && hasAgent(tab) ? () => restartFromUi(tab) : null,
+        restartLaunchers: launcherChoices(tab),
+        launcherCommand: (launcher) => launcherCommand(tab, launcher),
+        currentLauncher: tab.agentLauncher,
+        onRestartWith: (launcher) => restartFromUi(tab, launcher),
         onSplit: () => splitWith(tab.id),
         onColor: (i) => { tab.color = i; paintTab(tab); render(); persist(); },
         onPin: () => togglePin(tab),
@@ -1384,6 +1460,8 @@ if (reopen.length) {
   await openTab({ shell: state.defaultShell });
 }
 refreshWaiting();
+refreshAgents();
+setInterval(() => refreshAgents().catch(() => {}), 5000);
 // keep the list current: when the window comes back to the front, and once a minute
 window.addEventListener("focus", () => { if (Date.now() - waitingAt > 5000) refreshWaiting(); });
 setInterval(refreshWaiting, 60000);

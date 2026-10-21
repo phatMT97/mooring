@@ -41,5 +41,8 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Test agent restart
+        run: npm test
+
       - name: Build Tauri app
         run: npx tauri build --no-bundle

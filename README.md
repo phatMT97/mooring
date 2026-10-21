@@ -31,6 +31,12 @@ No AI inside the app, no account, about 6 MB.
   with a prompt, type into another tab, read another tab's screen or chat, and ping you when done:
   *"open a pane on the right and have another Claude fix this bug"*. `mooring install-agents`
   teaches Claude Code (a skill) and Codex (AGENTS.md) about it.
+- **Restart agents after an update.** Use the tab menu or command palette to restart one agent,
+  or all idle agents, in their existing sessions. WSL tabs show their tool and launcher
+  (Claude / vclaude / nclaude, Codex, agy). From another tab, use `mooring restart TAB` or
+  `mooring restart --all`; `--launcher vclaude` switches a Claude session's launcher.
+  Working tabs are skipped unless `--force` is given, and the caller's tab is always skipped.
+  Unfinished input is lost. Restart currently supports Claude and Codex; agy is identified only.
 - **Split view** for side-by-side comparisons (handy for demo videos), with labelled halves.
 - **Find in the terminal** (Ctrl+Shift+F), **Ctrl+Click** to open file paths and URLs (paths
   with spaces too), a **scroll handle** for full-screen TUIs that pulls faster the further you drag.
@@ -68,6 +74,23 @@ Windows Terminal:
 ```bash
 ./agent-tabs/install.sh   # symlinks into ~/.local/bin and ~/.config, copies the PowerShell side
 ```
+
+Launcher choices are discovered in each WSL shell from executable commands, functions and aliases
+whose names end in `claude`, `codex` or `agy` (such as `vclaude`, `nclaude`, `work-codex`).
+Only available launchers appear in the restart submenu and command palette. To register another
+name, add it under its tool in `~/.config/agent-tabs/launchers.json`:
+
+```json
+{
+  "claude": ["cc", "work-ai"],
+  "codex": ["cx"]
+}
+```
+
+These names must already be commands, functions or aliases in the shell; config does not define
+the commands themselves. Use bare names without arguments. Open a new tab or run
+`source ~/.config/agent-tabs/agent-tabs.bash` at the shell prompt after changing the config or
+defining launchers. `mooring restart TAB --launcher work-ai` uses the same discovered choices.
 
 ## Build
 

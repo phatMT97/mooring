@@ -563,6 +563,13 @@ body, #header, main, .tab, .avatar, .term { transition-property: background, bac
 .tm-tick { margin-left: auto; display: none; }
 .tm-tick svg.i { color: var(--c); stroke-width: 2.5; }
 .tm-reset.on .tm-tick { display: inline-flex; }
+.tm-restart-group { position: relative; display: flex; }
+.tm-restart-group .tm-restart { flex: 1; width: auto; }
+.tm-item.tm-launchers { width: 30px; flex: none; justify-content: center; padding: 0; }
+.tm-launchers[aria-expanded="true"] { background: var(--hover); }
+.tm-submenu { position: absolute; left: 100%; top: 0; min-width: 176px; }
+.tm-submenu[hidden] { display: none; }
+.tm-restart-with.on .tm-tick { display: inline-flex; }
 .tm-close:hover, .tm-close:hover svg.i { color: var(--danger); }
 .tm-sep { height: 1px; margin: 4px 6px; background: var(--stroke); }
 

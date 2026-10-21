@@ -11,6 +11,8 @@
   mooring wait TAB [--timeout S]             block until the agent in TAB has finished (waits for it
                                              to start first); run it in the background
   mooring focus TAB | close TAB [--force]
+  mooring restart TAB|--all [--force] [--launcher NAME]
+                                             restart idle agents in their existing sessions
   mooring split TAB [--down] | unsplit       put TAB beside this one / back to one tab
   mooring notify TEXT                        toast + flag this tab for the user
   mooring install-agents                     teach Claude Code and Codex about this command
@@ -18,7 +20,7 @@
 TAB is a tab id from `mooring tabs`, "self", or "other" (the other half of a split).
 Talks to the app through files in $MOORING_INBOX, which Mooring sets for its shells.
 """
-import glob, json, os, sys, time, uuid
+import glob, json, os, re, sys, time, uuid
 
 TIMEOUT = 15
 
@@ -83,7 +85,7 @@ def cmd_tabs(_):
         print("(no tabs)")
     for x in res["tabs"]:
         mark = "*" if x["active"] else ("+" if x["visible"] else " ")
-        state = x["status"] + (" agent" if x["agent"] else "")
+        state = x["status"] + (f" {x.get('launcher') or x.get('tool') or 'agent'}" if x["agent"] else "")
         print(f"{mark}{x['id']:>3}  {x['shell']:<10} {(x['repo'] or '-'):<20} {state:<14} {x['title']}")
     if res.get("split"):
         print(f"\nsplit: {res['split']['ids'][0]} | {res['split']['ids'][1]} ({res['split']['dir']})")
@@ -128,6 +130,21 @@ def cmd_read(args):
         print(res["text"])
 
 
+def cmd_restart(args):
+    force, all_tabs = flag(args, "--force"), flag(args, "--all")
+    launcher = option(args, "--launcher")
+    if (all_tabs and args) or (not all_tabs and len(args) != 1) or any(x.startswith("--") for x in args):
+        die("usage: mooring restart TAB|--all [--force] [--launcher NAME]")
+    if launcher is not None and (not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", launcher)
+                                 or launcher.startswith("_agent_tabs_")):
+        die("launcher must be a shell command name, without arguments")
+    # Each tab may need 20 s to exit; a batch must outlive the ordinary 15 s inbox timeout.
+    count = len(ask("tabs")["tabs"]) if all_tabs else 1
+    print("mooring: unfinished text in agent inputs will be lost", file=sys.stderr)
+    show(ask("restart", timeout=max(60, count * 25 + 15), tab=args[0] if args else None,
+             all=all_tabs, force=force, launcher=launcher))
+
+
 # ---- install-agents: tell Claude Code and Codex this command exists ------------------------------
 
 GUIDE = """Mooring is the terminal you are running in (Windows; WSL and PowerShell tabs, grouped by repo).
@@ -146,6 +163,16 @@ beside you, hand work to another agent, or check what another tab / agent is doi
   returns, instead of polling the tab in a loop.
 - `mooring send TAB "text" --enter` types into another tab (a shell command, or a prompt for the
   agent there). It refuses while that agent is working unless `--force`; prefer waiting.
+- `mooring restart TAB` exits an idle WSL agent and resumes the same session with its original
+  launcher, for example after an update. `mooring restart --all` restarts idle agents sequentially.
+  Working tabs are skipped unless `--force`; the caller's own tab is always skipped. Unfinished
+  text in the agent's input is lost. `--launcher NAME` selects an available launcher for the same
+  tool. Mooring discovers commands/functions/aliases named *claude, *codex or *agy in each shell;
+  add custom names in ~/.config/agent-tabs/launchers.json, e.g. {"claude": ["cc", "work-ai"]},
+  then open a new tab or source ~/.config/agent-tabs/agent-tabs.bash in that shell.
+  Codex uses `codex resume`. Sessions cannot move between tools. agy is identified in
+  `mooring tabs` but does not support restart yet. Check `mooring read TAB --chat` afterwards to
+  verify the session. Results include skipped tabs and per-tab failures.
 - `mooring focus TAB`, `mooring close TAB`, `mooring split TAB [--down]`, `mooring unsplit`,
   `mooring notify "done: …"` (shows a toast and flags your tab for the user).
 TAB is an id, `self`, or `other` (the other half of a split). Run commands for other tabs through
@@ -173,9 +200,10 @@ def cmd_install_agents(_):
     home = os.path.expanduser("~")
     skill = ("---\nname: mooring\ndescription: Drive the Mooring terminal this session runs in — list its tabs, "
              "open a tab or split pane running a command (another Claude/Codex with a prompt, tests, a server), "
-             "type into another tab, read another tab's screen or agent chat, focus or close tabs. Use when the "
+             "type into another tab, read another tab's screen or agent chat, restart agents in the same "
+             "session, focus or close tabs. Use when the "
              "user asks to open/split panes or tabs, run something beside you, hand work to another agent, or "
-             "check what another tab or session is doing.\n---\n\n# Mooring\n\n" + GUIDE + "\n")
+             "check what another tab or session is doing, or restart an idle agent after an update.\n---\n\n# Mooring\n\n" + GUIDE + "\n")
     # Claude Code: a user skill in every config dir (~/.claude, and CLAUDE_CONFIG_DIR variants)
     for cfg in sorted(glob.glob(os.path.join(home, ".claude*"))):
         if os.path.isdir(cfg) and os.path.exists(os.path.join(cfg, "settings.json")):
@@ -203,7 +231,7 @@ def main():
               "split": lambda a: show(ask("split", tab=a[0] if a else "other", dir="down" if "--down" in a else "right")),
               "notify": lambda a: ask("notify", text=" ".join(a))}
     table = {"tabs": cmd_tabs, "new": cmd_new, "send": cmd_send, "read": cmd_read, "wait": cmd_wait,
-             "install-agents": cmd_install_agents, **simple}
+             "restart": cmd_restart, "install-agents": cmd_install_agents, **simple}
     if cmd not in table:
         die(f"unknown command {cmd!r} (mooring --help)")
     table[cmd](rest)

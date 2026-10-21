@@ -10,18 +10,24 @@ Internal, used by ~/.config/agent-tabs/agent-tabs.bash:
   agent-tabs mark SHELL_PID LAUNCHER     agent-tabs claim CWD
   agent-tabs msg KEY [name=value ...]    print a message in the user's language
   agent-tabs context TAB [APP]           JSON digest of the agent running in termdeck tab TAB
+  agent-tabs running APP                 JSON agent identities for live tabs in APP
+  agent-tabs resume-cmd TAB APP [LAUNCHER] JSON restart plan for a live agent (agy unsupported)
+  agent-tabs launchers [--shell]          discover launchers from shell command names on stdin
   agent-tabs waiting                     JSON list of sessions waiting (for Mooring's sidebar)
   agent-tabs take SESSION | drop SESSION claim one to resume it (prints JSON cwd + cmd) / forget it
 
 Messages live in locales/<lang>.json next to this script (add a language by adding a file).
 Language: $AGENT_TABS_LANG, else $TERMDECK_LANG (set by termdeck), else $LC_ALL/$LANG, else English.
 """
-import glob, json, os, shlex, shutil, signal, subprocess, sys, time
+import glob, json, os, re, shlex, shutil, signal, subprocess, sys, time
 
 STATE = os.path.expanduser("~/.local/state/agent-tabs")
 RUN, CLAIMED = os.path.join(STATE, "run"), os.path.join(STATE, "claimed")
 CODEX_HOME = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
 AGY_HOME = os.path.expanduser("~/.gemini/antigravity-cli")
+LAUNCHER_CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+                               "agent-tabs", "launchers.json")
+TOOLS = ("claude", "codex", "agy")
 
 
 LOCALES = os.path.join(os.path.dirname(os.path.realpath(__file__)), "locales")
@@ -207,7 +213,8 @@ def live_session(shell_pid, kids):
 
 def guess_session(m, taken):
     started = m.get("started", 0) - 5
-    if m["launcher"] == "codex":
+    tool = m.get("tool") or next((t for t in TOOLS if m["launcher"].endswith(t)), "claude")
+    if tool == "codex":
         files = glob.glob(os.path.join(CODEX_HOME, "sessions", "*", "*", "*", "rollout-*.jsonl"))
         cands = []
         for p in files:
@@ -216,7 +223,7 @@ def guess_session(m, taken):
             meta = codex_meta(p)
             if meta.get("cwd") == m["cwd"] and meta.get("source") == "cli" and meta.get("id") not in taken:
                 cands.append((os.path.getmtime(p), "codex", meta.get("id")))
-    elif m["launcher"] == "agy":
+    elif tool == "agy":
         last = load(os.path.join(AGY_HOME, "cache", "last_conversations.json")) or {}
         sid = last.get(m["cwd"])
         db = os.path.join(AGY_HOME, "conversations", f"{sid}.db")
@@ -358,19 +365,138 @@ def cmd_context(tab, app="", turns=8, per_turn=1500, total=12000, last=False):
 
 
 def resume_cmd(m):
+    launcher, sid = shlex.quote(m["launcher"]), shlex.quote(m["session_id"])
     if m["tool"] == "codex":
-        return f"{m['launcher']} resume {m['session_id']}"
+        return f"{launcher} resume {sid}"
     if m["tool"] == "agy":
-        return f"{m['launcher']} --conversation {m['session_id']} --dangerously-skip-permissions"
-    return f"{m['launcher']} --resume {m['session_id']}"
+        return f"{launcher} --conversation {sid} --dangerously-skip-permissions"
+    return f"{launcher} --resume {sid}"
+
+
+def valid_launcher(name):
+    return isinstance(name, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", name) \
+        and not name.startswith("_agent_tabs_")
+
+
+def launcher_catalog(value):
+    """Only bare shell command names; arguments and command fragments are never launchers."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = {}
+    value = value if isinstance(value, dict) else {}
+    catalog, used = {}, set()
+    for tool in TOOLS:
+        names = value.get(tool, [])
+        catalog[tool] = sorted({n for n in names if valid_launcher(n)
+                                and n not in used and (n not in TOOLS or n == tool)}) \
+            if isinstance(names, list) else []
+        used.update(catalog[tool])
+    return catalog
+
+
+def cmd_launchers(shell=False):
+    available = {name.strip() for name in sys.stdin if valid_launcher(name.strip())}
+    configured = launcher_catalog(load(LAUNCHER_CONFIG))
+    assigned = {name: tool for tool, names in configured.items() for name in names}
+    available.update(path_launchers(assigned))
+    discovered = {tool: [] for tool in TOOLS}
+    for name in sorted(available):
+        tool = assigned.get(name) or next((t for t in TOOLS if name.endswith(t)), None)
+        if tool:
+            discovered[tool].append(name)
+    if shell:
+        print("JSON\t" + json.dumps(discovered))
+        for tool, names in discovered.items():
+            for name in names:
+                print(f"{tool}\t{name}")
+    else:
+        print(json.dumps(discovered))
+
+
+def path_launchers(configured):
+    # Bash compgen -c stats every executable, which is slow across Windows PATH directories.
+    # Filter directory entry names before checking whether a matching file is executable.
+    found = set()
+    for directory in dict.fromkeys(os.environ.get("PATH", "").split(os.pathsep)):
+        try:
+            with os.scandir(directory or ".") as entries:
+                for entry in entries:
+                    name = entry.name
+                    if valid_launcher(name) and (name in configured or any(name.endswith(t) for t in TOOLS)) \
+                            and entry.is_file() and os.access(entry.path, os.X_OK):
+                        found.add(name)
+        except OSError:
+            continue
+    return found
+
+
+def launcher_options(marker, tool):
+    catalog = launcher_catalog(marker.get("launchers"))
+    names = catalog[tool]
+    current = marker.get("launcher") or tool
+    owner = next((t for t, choices in catalog.items() if current in choices), None) \
+        or next((t for t in TOOLS if isinstance(current, str) and current.endswith(t)), None)
+    # Old markers still prove which launcher started this live tool, even without a catalog.
+    if valid_launcher(current) and owner in (None, tool) and current not in names:
+        names.append(current)
+    return sorted(names)
+
+
+def cmd_running(app):
+    # Read process identity, not the terminal title: Codex/agy need not use Claude's glyphs.
+    tracked = {str(m.get("termdeck_tab")): m for _, m in markers()
+               if m.get("termdeck_app") == app and alive(m)}
+    found = {}
+    for path in glob.glob("/proc/[0-9]*/comm"):
+        pid = int(path.split("/")[2])
+        tool = proc_comm(pid)
+        if tool not in TOOLS or not running(pid):
+            continue
+        env = proc_env(pid)
+        tab = env.get("TERMDECK_TAB")
+        if not tab or env.get("TERMDECK_APP") != app:
+            continue
+        marker = tracked.get(tab) or {"launchers": env.get("AGENT_TABS_LAUNCHERS")}
+        launcher = marker.get("launcher", tool)
+        options = launcher_options(marker, tool)
+        if launcher not in options:
+            launcher = tool
+        found.setdefault(tab, {"tab": tab, "tool": tool, "launcher": launcher, "launchers": options})
+    print(json.dumps(list(found.values())))
+
+
+def cmd_resume_cmd(tab, app, launcher=None):
+    shell = termdeck_shell(tab, app)
+    tool, sid, _ = live_session(shell, children_map()) if shell else (None, None, None)
+    error = None
+    if not sid:
+        error = "noSession"
+    elif tool == "agy":
+        error = "unsupported"
+    else:
+        marker = load(os.path.join(RUN, f"{shell}.json")) or {}
+        launcher = launcher or marker.get("launcher") or tool
+        if launcher not in launcher_options(marker, tool):
+            error = "invalidLauncher"
+    if error:
+        print(json.dumps({"error": error, "tool": tool}))
+        return
+    m = {"tool": tool, "session_id": sid, "launcher": launcher}
+    print(json.dumps({"tool": tool, "session": sid, "launcher": launcher,
+                      "cmd": resume_cmd(m), "exit": {"claude": "/exit", "codex": "/quit"}[tool]}))
 
 
 # ---- commands -----------------------------------------------------------
 
 def cmd_mark(shell_pid, launcher):
     os.makedirs(RUN, exist_ok=True)
+    catalog = launcher_catalog(os.environ.get("AGENT_TABS_LAUNCHERS"))
+    tool = next((t for t, names in catalog.items() if launcher in names), None)
     save(os.path.join(RUN, f"{shell_pid}.json"), {
-        "shell_pid": int(shell_pid), "launcher": launcher, "cwd": os.getcwd(),
+        "shell_pid": int(shell_pid), "launcher": launcher, "launchers": catalog, "tool": tool,
+        "cwd": os.getcwd(),
         "boot": boot_id(), "started": time.time(), "wt_session": os.environ.get("WT_SESSION"),
         "termdeck_app": os.environ.get("TERMDECK_APP"), "termdeck_run": os.environ.get("TERMDECK_RUN"),
         "termdeck_tab": os.environ.get("TERMDECK_TAB")})
@@ -633,6 +759,12 @@ def main():
         cmd_take(a[1], drop=cmd == "drop")
     elif cmd == "context":
         cmd_context(a[1], a[2] if len(a) > 2 and a[2] != "--last" else "", last="--last" in a)
+    elif cmd == "running":
+        cmd_running(a[1])
+    elif cmd == "resume-cmd":
+        cmd_resume_cmd(*a[1:4])
+    elif cmd == "launchers":
+        cmd_launchers(shell="--shell" in a)
     elif cmd == "msg":
         print(msg(a[1], **dict(kv.split("=", 1) for kv in a[2:])))
     else:

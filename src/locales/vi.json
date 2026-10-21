@@ -111,5 +111,21 @@
   "waiting.all": "Mở lại tất cả",
   "waiting.forgetAll": "Quên tất cả",
   "waiting.forgetAllTitle": "Quên {n} session đang chờ?",
-  "waiting.forgetAllBody": "Mooring sẽ không nhắc các session này nữa và không tự mở lại chúng. Lịch sử chat vẫn còn trong Claude/Codex (mở được bằng claude --resume)."
+  "waiting.forgetAllBody": "Mooring sẽ không nhắc các session này nữa và không tự mở lại chúng. Lịch sử chat vẫn còn trong Claude/Codex (mở được bằng claude --resume).",
+  "agent.restart": "Khởi động lại agent",
+  "agent.chooseLauncher": "Chọn launcher để khởi động lại",
+  "agent.restartAll": "Khởi động lại mọi agent đang rảnh",
+  "agent.restartWith": "Khởi động lại bằng {cmd}",
+  "agent.restarted": "Đã khởi động lại",
+  "agent.skippedBusy": "Đã bỏ qua: agent đang làm việc",
+  "agent.restartSummary": "Đã khởi động lại {n} tab · bỏ qua {m} tab đang làm việc · {f} lỗi",
+  "agent.draftWarning": "Đang khởi động lại: chữ đang gõ dở trong ô nhập sẽ mất",
+  "agent.noAgent": "Tab này không có agent đang chạy",
+  "agent.wslOnly": "Chỉ khởi động lại agent trong tab WSL",
+  "agent.alreadyRestarting": "Tab đang khởi động lại hoặc có lệnh đang chờ",
+  "agent.noSession": "Không tìm thấy session agent đang chạy; chưa gửi lệnh nào",
+  "agent.unsupported": "Đã nhận diện agy nhưng chưa hỗ trợ khởi động lại",
+  "agent.invalidLauncher": "Chọn launcher có sẵn của cùng công cụ; nạp lại shell hook sau khi đổi cấu hình launcher",
+  "agent.closed": "Tab hoặc shell đã đóng trong lúc khởi động lại",
+  "agent.promptTimeout": "Sau 20 giây chưa thấy dấu nhắc shell. Chưa gửi lệnh resume; hãy kiểm tra tab."
 }

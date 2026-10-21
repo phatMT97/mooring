@@ -31,6 +31,9 @@ fi
 
 _agent_tabs_track() {  # $1 = name shown/used for resume, rest = real command
   local launcher=$1; shift
+  # Profile functions/aliases may call another wrapped launcher; preserve the outer profile.
+  if [[ -n "${_agent_tabs_tracking:-}" ]]; then "$@"; return; fi
+  local _agent_tabs_tracking=1
   agent-tabs mark "$$" "$launcher" 2>/dev/null
   "$@"
   local rc=$?
@@ -38,15 +41,30 @@ _agent_tabs_track() {  # $1 = name shown/used for resume, rest = real command
   return $rc
 }
 
-for _f in claude nclaude vclaude; do
-  if declare -F "$_f" >/dev/null && ! declare -F "_agent_tabs_orig_$_f" >/dev/null; then
-    eval "$(declare -f "$_f" | sed "1s/^$_f /_agent_tabs_orig_$_f /")"
+while IFS=$'\t' read -r _at_tool _f; do
+  if [[ $_at_tool == JSON ]]; then
+    export AGENT_TABS_LAUNCHERS=$_f
+    continue
+  fi
+  if ! declare -F "_agent_tabs_orig_$_f" >/dev/null; then
+    if [[ -v BASH_ALIASES[$_f] ]]; then
+      # Preserve the alias's options/profile, then route calls through a tracked function.
+      _at_alias=${BASH_ALIASES[$_f]}
+      unalias "$_f"
+      # `alias claude='claude --flag'` refers to the executable, not our new function.
+      if [[ $_at_alias == "$_f" || $_at_alias == "$_f "* ]]; then _at_alias="command $_at_alias"; fi
+      eval "_agent_tabs_orig_$_f() { $_at_alias \"\$@\"; }"
+    elif ! declare -F "$_f" >/dev/null; then
+      eval "$_f() { _agent_tabs_track $_f command $_f \"\$@\"; }"
+      continue
+    else
+      [[ $(declare -f "$_f") == *"_agent_tabs_track $_f "* ]] && continue
+      eval "$(declare -f "$_f" | sed "1s/^$_f /_agent_tabs_orig_$_f /")"
+    fi
     eval "$_f() { _agent_tabs_track $_f _agent_tabs_orig_$_f \"\$@\"; }"
   fi
-done
-unset _f
-codex() { _agent_tabs_track codex command codex "$@"; }
-agy() { _agent_tabs_track agy command agy "$@"; }
+done < <({ compgen -A function; compgen -A alias; } | agent-tabs launchers --shell)
+unset _f _at_tool _at_alias
 
 # On a fresh interactive tab, pick up a session that was cut off in this directory.
 if [[ $- == *i* && -t 0 && -z "$BASH_EXECUTION_STRING" && -z "$AGENT_TABS_NO_CLAIM" && -z "$CLAUDECODE" ]]; then

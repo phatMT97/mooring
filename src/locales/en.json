@@ -111,5 +111,21 @@
   "waiting.all": "Reopen all",
   "waiting.forgetAll": "Forget all",
   "waiting.forgetAllTitle": "Forget {n} waiting sessions?",
-  "waiting.forgetAllBody": "Mooring stops offering these sessions and won't reopen them. Their chats stay in Claude/Codex (claude --resume still opens them)."
+  "waiting.forgetAllBody": "Mooring stops offering these sessions and won't reopen them. Their chats stay in Claude/Codex (claude --resume still opens them).",
+  "agent.restart": "Restart agent",
+  "agent.chooseLauncher": "Choose restart launcher",
+  "agent.restartAll": "Restart all idle agents",
+  "agent.restartWith": "Restart with {cmd}",
+  "agent.restarted": "Agent restarted",
+  "agent.skippedBusy": "Skipped: agent is working",
+  "agent.restartSummary": "Restarted {n} tabs · skipped {m} working · {f} failed",
+  "agent.draftWarning": "Restarting: unfinished text in the agent input will be lost",
+  "agent.noAgent": "No running agent in this tab",
+  "agent.wslOnly": "Agent restart is only available in WSL tabs",
+  "agent.alreadyRestarting": "This tab is restarting or has a queued command",
+  "agent.noSession": "Cannot find a live agent session; nothing was sent",
+  "agent.unsupported": "agy is detected, but restart is not supported yet",
+  "agent.invalidLauncher": "Choose an available launcher for the same tool; reload the shell hooks after changing launcher config",
+  "agent.closed": "The tab or shell closed during restart",
+  "agent.promptTimeout": "No shell prompt after 20 seconds. Resume was not sent; check the tab."
 }
