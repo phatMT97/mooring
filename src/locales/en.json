@@ -130,5 +130,10 @@
   "agent.unsupported": "agy is detected, but restart is not supported yet",
   "agent.invalidLauncher": "Choose an available launcher for the same tool; reload the shell hooks after changing launcher config",
   "agent.closed": "The tab or shell closed during restart",
-  "agent.promptTimeout": "No shell prompt after 20 seconds. Resume was not sent; check the tab."
+  "agent.promptTimeout": "No shell prompt after 20 seconds. Resume was not sent; check the tab.",
+  "group.collapse": "Collapse group",
+  "group.expand": "Expand group",
+  "group.collapseAll": "Collapse all groups",
+  "group.expandAll": "Expand all groups",
+  "group.working": "{n} agents working"
 }

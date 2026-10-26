@@ -620,6 +620,8 @@ function openPalette() {
     { label: t("split.down"), run: run(() => splitNew("col")) },
     ...(state.split ? [{ label: t("split.rotate"), run: run(rotateSplit) }, { label: t("split.off"), run: run(unsplit) }] : []),
     { label: t("search.open"), run: run(searchActive) },
+    { label: t("group.collapseAll"), run: run(() => setAllGroups(true)) },
+    { label: t("group.expandAll"), run: run(() => setAllGroups(false)) },
     { label: t("sidebar.toggle"), run: run(toggleSidebar) },
     { label: t("appearance"), run: run(() => themeBtn.click()) },
     { label: t("shortcuts.button"), run: run(toggleShortcuts) },
@@ -776,9 +778,15 @@ async function shareContext(from, to) {
 function agentContextText(ctx, name, to) {
   const path = to.shell === "wsl" ? ctx.transcript : toWinPath(ctx.transcript);
   const turns = ctx.turns.map((x) => `[${x.role}]\n${x.text}`).join("\n\n");
+  // what it did, so the reader needn't open the transcript for that
+  const act = ctx.activity ?? {};
+  const did = [
+    act.edited?.length ? `Files it changed (latest last): ${act.edited.join(", ")}` : "",
+    act.commands?.length ? `Commands it ran last:\n${act.commands.map((c) => `  $ ${c}`).join("\n")}` : "",
+  ].filter(Boolean).join("\n");
   return `<session-context from="${ctx.tool} · ${name}" session="${ctx.session}">\n` +
     `Latest turns of another ${ctx.tool} session${ctx.title ? ` ("${ctx.title}")` : ""}, working in ${ctx.cwd}. ` +
-    `Its full transcript (JSONL) is ${path} if you need more.\n\n${turns}\n</session-context> `;
+    `Its full transcript (JSONL) is ${path} if you need more.\n${did ? `\n${did}\n` : ""}\n${turns}\n</session-context> `;
 }
 
 // The last `n` lines a tab shows (scrollback included, the empty rows under the cursor not),
@@ -1142,9 +1150,26 @@ function drop(source, target, after) {
   }
 }
 
+// A folded group shows its heading only, plus whichever of its tabs is on screen.
+function toggleGroup(key, fold = !collapsedGroups().has(key)) {
+  const keep = [...collapsedGroups()].filter((k) => k !== key);
+  state.collapsed = fold ? [...keep, key] : keep;
+  render();
+  persist();
+}
+
+function setAllGroups(fold) {
+  state.collapsed = fold ? [...new Set(orderedTabs().map(groupKey))] : [];
+  render();
+  persist();
+}
+
+const collapsedGroups = () => new Set(state.collapsed ?? []);
+
 function render() {
   const nav = document.getElementById("groups");
   nav.replaceChildren();
+  const collapsed = collapsedGroups();
   let lastKey = null;
   for (const tab of orderedTabs()) {
     const key = groupKey(tab);
@@ -1153,8 +1178,20 @@ function render() {
       const members = [...tabs.values()].filter((t) => groupKey(t) === key);
       const needs = members.filter((t) => t.status === "needs").length;
       const head = document.createElement("div");
-      head.className = "group-head";
-      head.innerHTML = `${key === PINNED ? icons.pin : `<span class="rule"></span>`}<span class="name"></span><span class="count">${members.length}</span>${needs ? `<span class="needs">${t("group.needs", { n: needs })}</span>` : ""}`;
+      const folded = collapsed.has(key);
+      const working = folded ? members.filter((t) => t.status === "working").length : 0;
+      head.className = "group-head" + (folded ? " collapsed" : "");
+      head.innerHTML = `${icons.chevronDown.replace('class="i"', 'class="i fold"')}${key === PINNED ? icons.pin : `<span class="rule"></span>`}<span class="name"></span>`
+        + `${working ? `<span class="busy" title="${t("group.working", { n: working })}"></span>` : ""}<span class="count">${members.length}</span>`
+        + `${needs ? `<span class="needs">${t("group.needs", { n: needs })}</span>` : ""}`;
+      head.setAttribute("role", "button");
+      head.tabIndex = 0;
+      head.setAttribute("aria-expanded", String(!folded));
+      head.title = t(folded ? "group.expand" : "group.collapse");
+      head.onclick = (e) => { if (!suppressClick && !e.target.closest("button")) toggleGroup(key); };
+      head.onkeydown = (e) => {
+        if (e.target === head && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleGroup(key); }
+      };
       head.style.setProperty("--tc", key === PINNED ? theme.ui.text2 : colorsFor(tab.root).accent);
       head.querySelector(".name").textContent = groupName(key);
       if (key !== PINNED && key !== OTHER) {
@@ -1173,6 +1210,7 @@ function render() {
       wireDrag(head, { kind: "group", key });
       nav.append(head);
     }
+    if (collapsed.has(key) && tab.id !== state.active && !state.split?.ids.includes(tab.id)) continue;
     const row = document.createElement("div");
     row.className = "tab" + (tab.id === state.active ? " active" : state.split?.ids.includes(tab.id) ? " paired" : "");
     row.style.setProperty("--tc", tab.colors.accent);
@@ -1391,6 +1429,7 @@ state.lang = setLang(saved?.lang || (saved ? "vi" : defaultLang()));
 state.sidebar = saved?.sidebar || state.sidebar;
 state.defaultShell = saved?.defaultShell || state.defaultShell;
 state.waitingOpen = !!saved?.waitingOpen;
+state.collapsed = Array.isArray(saved?.collapsed) ? saved.collapsed : [];
 state.theme = saved?.theme || "mocha";
 setTheme(state.theme);
 const themeBtn = document.getElementById("theme-btn");

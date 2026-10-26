@@ -4,6 +4,9 @@
 #  - remembers which claude/agy session runs in this tab and auto-resumes it after a shutdown.
 # Pin a colour with lines "<repo-name> #rrggbb" in %LOCALAPPDATA%\agent-tabs\tints.
 
+# Only run inside Mooring unless explicitly enabled elsewhere
+if (-not $env:TERMDECK_TAB -and -not $env:AGENT_TABS_CLAIM_ANYWHERE) { return }
+
 $global:AgentTabsHome = Join-Path $env:LOCALAPPDATA 'agent-tabs'
 $global:AgentTabsRun = Join-Path $global:AgentTabsHome 'run'
 $global:AgentTabsTints = '#10243a', '#2a1020', '#12301e', '#2e2410', '#241a38', '#0f2e2e', '#321616', '#1f2a10'
@@ -235,7 +238,8 @@ if ($global:AgentTabsPlainShell -and $Host.UI.SupportsVirtualTerminal -and -not 
     $rows = @(Get-AgentTabsPending)
     $claimed = $null
     # Only tabs reopened at launch resume on their own; one opened by hand in termdeck just says so.
-    $byHand = $env:TERMDECK_TAB -and -not $env:TERMDECK_RESTORING
+    # outside Mooring too: Windows Terminal reopening at sign-in must not take Mooring's sessions
+    $byHand = ($env:TERMDECK_TAB -and -not $env:TERMDECK_RESTORING) -or (-not $env:TERMDECK_TAB -and -not $env:AGENT_TABS_CLAIM_ANYWHERE)
     $waitingHere = @($rows | Where-Object { $_.cwd -eq $here }).Count
     if (-not $byHand) {
         foreach ($m in ($rows | Sort-Object started)) {

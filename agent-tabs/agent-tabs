@@ -173,10 +173,13 @@ def codex_session(pid):
         fds = [os.readlink(p) for p in glob.glob(f"/proc/{pid}/fd/*")]
     except OSError:
         fds = []
+    # With Auto Review on, codex also keeps a reviewer ("Guardian review") thread open, in its own
+    # rollout that names the main one as parent_thread_id. The session to resume is the main one.
     for target in fds:
         if "/sessions/" in target and os.path.basename(target).startswith("rollout-"):
             meta = codex_meta(target)
-            return meta.get("id"), meta.get("cwd")
+            if meta.get("id"):
+                return meta.get("parent_thread_id") or meta["id"], meta.get("cwd")
     return None, None
 
 
@@ -221,7 +224,9 @@ def guess_session(m, taken):
             if os.path.getmtime(p) < started:
                 continue
             meta = codex_meta(p)
-            if meta.get("cwd") == m["cwd"] and meta.get("source") == "cli" and meta.get("id") not in taken:
+            # a person's session: not a reviewer sub-thread, not `codex exec` or a run driven by another agent
+            mine = not meta.get("parent_thread_id") and meta.get("originator") not in ("codex_exec", "Claude Code")
+            if meta.get("cwd") == m["cwd"] and mine and meta.get("id") not in taken:
                 cands.append((os.path.getmtime(p), "codex", meta.get("id")))
     elif tool == "agy":
         last = load(os.path.join(AGY_HOME, "cache", "last_conversations.json")) or {}
@@ -332,6 +337,84 @@ def codex_turns(path):
                 yield p["role"], text
 
 
+# ---- what an agent did: files it changed and commands it ran ------------------------------------
+
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+PATCH_FILE = re.compile(r"\*\*\* (?:Update|Add|Delete) File: ([^\\\n\"]+)")
+CODEX_CMD = re.compile(r'exec_command\(\{[^}]*?"?\bcmd"?\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _unquote(js):
+    try:
+        return json.loads(f'"{js}"')
+    except ValueError:
+        return js
+
+
+def _claude_calls(path):
+    for line in open(path, errors="ignore"):
+        if '"tool_use"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if d.get("isSidechain"):
+            continue
+        for b in (d.get("message") or {}).get("content") or []:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                inp = b.get("input") or {}
+                if b.get("name") in EDIT_TOOLS:
+                    yield "edit", inp.get("file_path") or inp.get("notebook_path")
+                elif b.get("name") == "Bash":
+                    yield "cmd", inp.get("command")
+
+
+def _codex_calls(path):
+    for line in open(path, errors="ignore"):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        p = d.get("payload") or {}
+        if d.get("type") != "response_item" or p.get("type") not in ("custom_tool_call", "function_call"):
+            continue
+        text = p.get("input") or p.get("arguments") or ""
+        for f in PATCH_FILE.findall(text):
+            yield "edit", f
+        if p.get("type") == "custom_tool_call":  # code mode: tools.exec_command({cmd: "..."})
+            for c in CODEX_CMD.findall(text):
+                yield "cmd", _unquote(c)
+        elif p.get("name") in ("shell", "exec_command", "local_shell"):
+            try:
+                args = json.loads(text)
+            except ValueError:
+                continue
+            c = args.get("cmd") or args.get("command")
+            if isinstance(c, list):  # ["bash", "-lc", "..."]
+                c = c[-1] if len(c) > 2 and c[1] in ("-lc", "-c") else " ".join(c)
+            yield "cmd", c
+
+
+def activity(tool, path, cwd, files=12, commands=8):
+    """{edited: [...], commands: [...]}: the files an agent changed (each once, latest last) and
+    the last commands it ran, so whoever takes over sees what was done without the transcript."""
+    edited, ran = [], []
+    for kind, value in (_claude_calls(path) if tool == "claude" else _codex_calls(path)):
+        if not value:
+            continue
+        if kind == "edit":
+            if cwd and value.startswith(cwd.rstrip("/") + "/"):
+                value = value[len(cwd.rstrip("/")) + 1:]
+            if value in edited:
+                edited.remove(value)
+            edited.append(value)
+        else:
+            first = value.strip().splitlines()[0] if value.strip() else ""
+            ran.append(first if len(first) <= 140 else first[:139] + "…")
+    return {"edited": edited[-files:], "commands": ran[-commands:]}
+
+
 def cmd_context(tab, app="", turns=8, per_turn=1500, total=12000, last=False):
     """last=True: just the agent's whole answer to the latest prompt (all its text since then)."""
     shell = termdeck_shell(tab, app)
@@ -361,7 +444,8 @@ def cmd_context(tab, app="", turns=8, per_turn=1500, total=12000, last=False):
         out.insert(0, {"role": role, "text": text})
         size += len(text)
     print(json.dumps({"tool": tool, "session": sid, "cwd": cwd, "title": title_for(tool, sid),
-                      "transcript": path, "turns": out}, ensure_ascii=False))
+                      "transcript": path, "turns": out, "activity": activity(tool, path, cwd)},
+                     ensure_ascii=False))
 
 
 def resume_cmd(m):
@@ -521,18 +605,39 @@ def cmd_snapshot():
                 save(path, m)
 
 
-def live_ids(skip=()):
-    """Session ids of every agent process running now, tracked by a marker or not."""
-    ids = set()
+def live_agents(skip=()):
+    """{session id: pid} of every agent process running now, tracked by a marker or not."""
+    found = {}
     for comm_path in glob.glob("/proc/[0-9]*/comm"):
         pid = comm_path.split("/")[2]
         if int(pid) in skip:
             continue
         lookup = {"claude": claude_session, "codex": codex_session, "agy": agy_session}.get(proc_comm(pid))
-        if lookup:
-            ids.add(lookup(pid)[0])
-    ids.discard(None)
-    return ids
+        sid = lookup(pid)[0] if lookup else None
+        if sid:
+            found[sid] = int(pid)
+    return found
+
+
+def live_ids(skip=()):
+    return set(live_agents(skip))
+
+
+def log(event):
+    """events.log: why markers come and go (debugging lost resumes)."""
+    try:
+        with open(os.path.join(STATE, "events.log"), "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [{os.getpid()} {' '.join(sys.argv[1:3])}] {event}\n")
+    except OSError:
+        pass
+
+
+def forget(path, m, why):
+    log(f"forget {m.get('session_id')} {m.get('title')!r} ({os.path.basename(path)}): {why}")
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 STALE_DAYS = 7  # a session nobody resumed for this long is forgotten (the agent's own history keeps it)
@@ -543,21 +648,30 @@ def pending():
     rows = []
     for path, m in markers():
         if not alive(m) and time.time() - max(m.get("started", 0), m.get("seen", 0)) > STALE_DAYS * 86400:
-            os.remove(path)
+            forget(path, m, "stale")
         else:
             rows.append((path, m))
     # agents in left-behind shells are as good as cut off: they don't count as running elsewhere
     behind = [m["shell_pid"] for _, m in rows if alive(m) and left_behind(m)]
     kids = children_map() if behind else {}
-    out, taken = [], live_ids({p for b in behind for p in [b] + descendants(b, kids)})
+    live = live_agents({p for b in behind for p in [b] + descendants(b, kids)})
+    out, owned, queued = [], set(), set()
     for path, m in sorted(rows, key=lambda r: r[1].get("started", 0), reverse=True):
+        sid = m.get("session_id")
         if alive(m) and not left_behind(m):
-            taken.add(m.get("session_id"))
-        elif m.get("session_id") in taken:
-            os.remove(path)  # already running elsewhere, or a newer marker has it
+            owned.add(sid)  # its own tab is running it
+        elif sid and sid in queued:
+            forget(path, m, "older duplicate of a queued marker")
+        elif sid and (sid in owned or (sid in live and not orphaned(live[sid]))):
+            # running in another tab or window right now: skip it, but keep the marker. A session
+            # is never dropped for "running elsewhere": that agent may be about to die with it.
+            continue
         else:
+            if sid in live:  # still running, but with no terminal left: end it when resumed
+                m["orphan_pid"] = live[sid]
             out.append((path, m))
-            taken.add(m.get("session_id"))
+            queued.add(sid)
+    taken = owned | queued | set(live)
     out.reverse()
     for path, m in out:
         if not m.get("session_id"):
@@ -569,22 +683,26 @@ def pending():
         if m.get("tool") == "claude" and not glob.glob(os.path.expanduser(f"~/.claude*/projects/*/{m['session_id']}.jsonl")):
             m["session_id"] = None  # opened but never used: no transcript to resume
         if not m.get("session_id"):
-            os.remove(path)  # nothing to resume
+            forget(path, m, "nothing to resume (no session id or transcript)")
     return [(p, m) for p, m in out if m.get("session_id")]
 
 
-def take(path):
-    """Atomically claim a marker so two restored tabs never resume the same session."""
+def take(path, m=None):
+    """Atomically claim a marker so two restored tabs never resume the same session.
+    m: the marker as pending() saw it (it may name an orphaned agent still holding the session)."""
     os.makedirs(CLAIMED, exist_ok=True)
     dest = os.path.join(CLAIMED, os.path.basename(path))
     try:
         os.rename(path, dest)
     except OSError:
         return False
-    m = load(dest) or {}
+    seen, m = m or {}, load(dest) or {}
     os.remove(dest)
+    log(f"take {m.get('session_id')} {m.get('title')!r} ({os.path.basename(path)})")
     if m.get("shell_pid") and alive(m) and left_behind(m):
         hang_up(m["shell_pid"])
+    if seen.get("orphan_pid"):
+        hang_up(seen["orphan_pid"])
     return True
 
 
@@ -624,10 +742,14 @@ def claimable(m):
 
 
 def cmd_claim(cwd):
-    # Only tabs reopened at launch resume on their own. A tab opened by hand in termdeck says what
-    # waits here instead (`agent-resume`, which sets AGENT_TABS_NO_WAIT, does take one).
-    if os.environ.get("TERMDECK_TAB") and not os.environ.get("TERMDECK_RESTORING") \
-            and not os.environ.get("AGENT_TABS_NO_WAIT"):
+    # Only tabs Mooring reopens at launch resume on their own. A tab opened by hand says what waits
+    # there instead (`agent-resume`, which sets AGENT_TABS_NO_WAIT, does take one). So does every
+    # other terminal (Windows Terminal reopening itself at sign-in once took them all before
+    # Mooring started), unless AGENT_TABS_CLAIM_ANYWHERE is set.
+    in_mooring = bool(os.environ.get("TERMDECK_TAB"))
+    by_hand = (in_mooring and not os.environ.get("TERMDECK_RESTORING")) \
+        or (not in_mooring and not os.environ.get("AGENT_TABS_CLAIM_ANYWHERE"))
+    if by_hand and not os.environ.get("AGENT_TABS_NO_WAIT"):
         rows = pending()
         here = sum(m["cwd"] == cwd for _, m in rows)
         if here:
@@ -639,7 +761,7 @@ def cmd_claim(cwd):
     while True:
         rows = pending()
         for path, m in sorted(rows, key=lambda r: (not mine(r[1]), r[1].get("started", 0))):
-            if m["cwd"] == cwd and claimable(m) and take(path):
+            if m["cwd"] == cwd and claimable(m) and take(path, m):
                 label = " ".join((m.get("title") or m["session_id"][:8]).split())
                 print(f"R\t{label}\t{resume_cmd(m)}")
                 return
@@ -677,7 +799,7 @@ def cmd_waiting():
 
 def cmd_take(session, drop=False):
     for path, m in pending():
-        if m["session_id"] == session and take(path):
+        if m["session_id"] == session and take(path, m):
             if not drop:
                 print(json.dumps({"cwd": m["cwd"], "cmd": resume_cmd(m)}, ensure_ascii=False))
             return

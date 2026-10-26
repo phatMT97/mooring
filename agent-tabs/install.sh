@@ -20,7 +20,7 @@ systemctl --user enable --now agent-tabs.timer >/dev/null
 echo "  systemd timer agent-tabs.timer enabled"
 
 if ! grep -q 'agent-tabs/agent-tabs.bash' "$HOME/.bashrc"; then
-  printf '\n# agent-tabs: resume claude/codex/agy sessions after WSL restarts (keep last)\n[ -f ~/.config/agent-tabs/agent-tabs.bash ] && . ~/.config/agent-tabs/agent-tabs.bash\n' >> "$HOME/.bashrc"
+  printf '\n# agent-tabs: resume claude/codex/agy sessions after WSL restarts (only inside Mooring)\n[ -n "$TERMDECK_TAB" ] && [ -f ~/.config/agent-tabs/agent-tabs.bash ] && . ~/.config/agent-tabs/agent-tabs.bash\n' >> "$HOME/.bashrc"
   echo "  sourced from ~/.bashrc"
 fi
 

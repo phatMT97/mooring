@@ -1,6 +1,9 @@
 # agent-tabs: remember which agent session runs in each tab and offer to resume it
 # after WSL / Windows Terminal restarts. Sourced at the end of ~/.bashrc.
 
+# Only run inside Mooring unless explicitly enabled elsewhere
+[[ -z "${TERMDECK_TAB:-}" && -z "${AGENT_TABS_CLAIM_ANYWHERE:-}" ]] && return 0 2>/dev/null || true
+
 # Tell Windows Terminal the cwd so "Open windows from a previous session" restores it.
 # Not gated on $WT_SESSION: it is unset when WSL is started from the Start menu and handed to WT.
 if [[ $- == *i* && -z "$TMUX" && "$TERM_PROGRAM" != vscode ]]; then

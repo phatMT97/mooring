@@ -130,5 +130,10 @@
   "agent.unsupported": "Đã nhận diện agy nhưng chưa hỗ trợ khởi động lại",
   "agent.invalidLauncher": "Chọn launcher có sẵn của cùng công cụ; nạp lại shell hook sau khi đổi cấu hình launcher",
   "agent.closed": "Tab hoặc shell đã đóng trong lúc khởi động lại",
-  "agent.promptTimeout": "Sau 20 giây chưa thấy dấu nhắc shell. Chưa gửi lệnh resume; hãy kiểm tra tab."
+  "agent.promptTimeout": "Sau 20 giây chưa thấy dấu nhắc shell. Chưa gửi lệnh resume; hãy kiểm tra tab.",
+  "group.collapse": "Thu gọn nhóm",
+  "group.expand": "Mở rộng nhóm",
+  "group.collapseAll": "Thu gọn tất cả nhóm",
+  "group.expandAll": "Mở rộng tất cả nhóm",
+  "group.working": "{n} agent đang làm"
 }

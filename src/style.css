@@ -126,6 +126,18 @@ body.sidebar-auto #pane.peek {
   font-weight: 600;
   color: var(--text-2);
 }
+.group-head { cursor: pointer; border-radius: var(--r-sm); }
+.group-head:hover { background: var(--hover); }
+.group-head > svg.fold { width: 12px; height: 12px; margin: 0 -2px 0 -4px; color: var(--text-3); transition: transform .15s var(--ease); }
+.group-head.collapsed > svg.fold { transform: rotate(-90deg); }
+.group-head .busy {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tc);
+  flex: none;
+  animation: pulse 1.6s ease-in-out infinite;
+}
 .group-head .rule { width: 12px; height: 4px; border-radius: 2px; background: var(--tc); flex: none; }
 .group-head .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-head .count { font-weight: 500; color: var(--text-3); }
@@ -242,7 +254,8 @@ body.sidebar-auto #pane:not(.peek) .avatar.working::after { border-radius: 15px;
 .tab .pin:hover, .tab .close:hover { background: var(--selected); color: var(--text); }
 
 /* drag & drop */
-.tab, .group-head { cursor: default; touch-action: none; }
+.tab { cursor: default; }
+.tab, .group-head { touch-action: none; }
 .dragging { opacity: .3; }
 .drag-ghost {
   position: fixed;
@@ -282,7 +295,8 @@ body.sidebar-auto #pane:not(.peek) #new-buttons,
 body.sidebar-auto #pane:not(.peek) .label,
 body.sidebar-auto #pane:not(.peek) .close,
 body.sidebar-auto #pane:not(.peek) .pin,
-body.sidebar-auto #pane:not(.peek) .group-head > :not(.rule, svg) { display: none; }
+body.sidebar-auto #pane:not(.peek) .group-head > :not(.rule, svg),
+body.sidebar-auto #pane:not(.peek) .group-head > svg.fold { display: none; }
 body.sidebar-auto #pane:not(.peek) #topbar { flex-direction: column; height: auto; padding: 0 0 6px; }
 body.sidebar-auto #pane:not(.peek) #rail-new { display: grid; }
 body.sidebar-auto #pane:not(.peek) #groups { padding: 0 6px; }
