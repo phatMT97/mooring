@@ -152,6 +152,14 @@ def proc_comm(pid):
         return ""
 
 
+def proc_cmdline(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().decode(errors="ignore").split("\0")
+    except OSError:
+        return []
+
+
 def claude_session(pid):
     cfg = proc_env(pid).get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     info = load(os.path.join(cfg, "sessions", f"{pid}.json"))
@@ -202,6 +210,8 @@ def live_session(shell_pid, kids):
             if sid:
                 return "claude", sid, cwd
         elif comm == "codex":
+            if any(arg in ("app-server", "--managed-daemon", "daemon") for arg in proc_cmdline(pid)):
+                continue
             sid, cwd = codex_session(pid)
             if sid:
                 return "codex", sid, cwd
@@ -528,6 +538,30 @@ def launcher_options(marker, tool):
     return sorted(names)
 
 
+def cmd_freeze(tab, app):
+    kids = children_map()
+    for _, m in markers():
+        if str(m.get("termdeck_tab")) == str(tab) and m.get("termdeck_app") == app and alive(m):
+            pids = [m["shell_pid"]] + descendants(m["shell_pid"], kids)
+            for p in pids:
+                try:
+                    os.kill(p, signal.SIGSTOP)
+                except OSError:
+                    pass
+
+
+def cmd_thaw(tab, app):
+    kids = children_map()
+    for _, m in markers():
+        if str(m.get("termdeck_tab")) == str(tab) and m.get("termdeck_app") == app and alive(m):
+            pids = [m["shell_pid"]] + descendants(m["shell_pid"], kids)
+            for p in pids:
+                try:
+                    os.kill(p, signal.SIGCONT)
+                except OSError:
+                    pass
+
+
 def cmd_running(app):
     # Read process identity, not the terminal title: Codex/agy need not use Claude's glyphs.
     tracked = {str(m.get("termdeck_tab")): m for _, m in markers()
@@ -538,6 +572,8 @@ def cmd_running(app):
         tool = proc_comm(pid)
         if tool not in TOOLS or not running(pid):
             continue
+        if tool == "codex" and any(arg in ("app-server", "--managed-daemon", "daemon") for arg in proc_cmdline(pid)):
+            continue
         env = proc_env(pid)
         tab = env.get("TERMDECK_TAB")
         if not tab or env.get("TERMDECK_APP") != app:
@@ -547,8 +583,26 @@ def cmd_running(app):
         options = launcher_options(marker, tool)
         if launcher not in options:
             launcher = tool
-        found.setdefault(tab, {"tab": tab, "tool": tool, "launcher": launcher, "launchers": options})
-    print(json.dumps(list(found.values())))
+        lookup = {"claude": claude_session, "codex": codex_session, "agy": agy_session}.get(tool)
+        sid, _ = lookup(pid) if lookup else (None, None)
+        if not sid and marker.get("session_id"):
+            sid = marker.get("session_id")
+        title = marker.get("title") or (title_for(tool, sid) if sid else None)
+        existing = found.get(tab)
+        if not existing or (not existing.get("session") and sid):
+            found[tab] = {
+                "tab": tab, "tool": tool, "launcher": launcher, "launchers": options,
+                "session": sid or (existing.get("session") if existing else None),
+                "title": title or (existing.get("title") if existing else None),
+            }
+        if sid and marker.get("shell_pid") and marker.get("session_id") != sid:
+            marker_path = os.path.join(RUN, f"{marker['shell_pid']}.json")
+            if os.path.exists(marker_path):
+                marker["session_id"] = sid
+                if title:
+                    marker["title"] = title
+                save(marker_path, marker)
+    print(json.dumps(list(found.values()), ensure_ascii=False))
 
 
 def cmd_resume_cmd(tab, app, launcher=None):
@@ -691,19 +745,55 @@ def take(path, m=None):
     """Atomically claim a marker so two restored tabs never resume the same session.
     m: the marker as pending() saw it (it may name an orphaned agent still holding the session)."""
     os.makedirs(CLAIMED, exist_ok=True)
-    dest = os.path.join(CLAIMED, os.path.basename(path))
+    seen, m = m or {}, load(path) or m or {}
+    sid = m.get("session_id") or seen.get("session_id")
+    dest = os.path.join(CLAIMED, f"{sid}.json" if sid else os.path.basename(path))
     try:
-        os.rename(path, dest)
+        os.replace(path, dest)
     except OSError:
         return False
-    seen, m = m or {}, load(dest) or {}
-    os.remove(dest)
-    log(f"take {m.get('session_id')} {m.get('title')!r} ({os.path.basename(path)})")
+    if m:
+        save(dest, m)
+    log(f"take {sid} {m.get('title')!r} ({os.path.basename(path)})")
     if m.get("shell_pid") and alive(m) and left_behind(m):
         hang_up(m["shell_pid"])
     if seen.get("orphan_pid"):
         hang_up(seen["orphan_pid"])
     return True
+
+
+def cmd_preserve(session_id):
+    """Restore a claimed or failed marker back to RUN so it can be resumed later."""
+    if not session_id:
+        return
+    os.makedirs(RUN, exist_ok=True)
+    for _, cur in markers():
+        if cur.get("session_id") == session_id:
+            return
+    cand = os.path.join(CLAIMED, f"{session_id}.json")
+    m = load(cand) if os.path.exists(cand) else None
+    if not m:
+        for p in glob.glob(os.path.join(CLAIMED, "*.json")):
+            cur = load(p)
+            if cur and cur.get("session_id") == session_id:
+                cand, m = p, cur
+                break
+    if not m:
+        m = {
+            "boot": boot_id(),
+            "session_id": session_id,
+            "cwd": os.getcwd(),
+            "started": time.time(),
+        }
+    m["seen"] = time.time()
+    dest = os.path.join(RUN, f"preserved_{session_id}.json")
+    save(dest, m)
+    if os.path.exists(cand):
+        try:
+            os.remove(cand)
+        except OSError:
+            pass
+    log(f"preserve {session_id} {m.get('title')!r} back to run")
 
 
 def orphaned(pid):
@@ -749,7 +839,8 @@ def cmd_claim(cwd):
     in_mooring = bool(os.environ.get("TERMDECK_TAB"))
     by_hand = (in_mooring and not os.environ.get("TERMDECK_RESTORING")) \
         or (not in_mooring and not os.environ.get("AGENT_TABS_CLAIM_ANYWHERE"))
-    if by_hand and not os.environ.get("AGENT_TABS_NO_WAIT"):
+    target_session = os.environ.get("TERMDECK_SESSION")
+    if by_hand and not target_session and not os.environ.get("AGENT_TABS_NO_WAIT"):
         rows = pending()
         here = sum(m["cwd"] == cwd for _, m in rows)
         if here:
@@ -760,10 +851,20 @@ def cmd_claim(cwd):
     deadline = time.time() + 15
     while True:
         rows = pending()
+        if target_session:
+            for path, m in rows:
+                if m.get("session_id") == target_session and take(path, m):
+                    label = " ".join((m.get("title") or m["session_id"][:8]).split())
+                    print(f"R\t{label}\t{resume_cmd(m)}\t{m['session_id']}\t{m.get('tool', '')}")
+                    return
+            if not dying_here(cwd) or time.time() > deadline:
+                break
+            time.sleep(0.5)
+            continue
         for path, m in sorted(rows, key=lambda r: (not mine(r[1]), r[1].get("started", 0))):
             if m["cwd"] == cwd and claimable(m) and take(path, m):
                 label = " ".join((m.get("title") or m["session_id"][:8]).split())
-                print(f"R\t{label}\t{resume_cmd(m)}")
+                print(f"R\t{label}\t{resume_cmd(m)}\t{m['session_id']}\t{m.get('tool', '')}")
                 return
         if not dying_here(cwd) or time.time() > deadline:
             break
@@ -800,7 +901,15 @@ def cmd_waiting():
 def cmd_take(session, drop=False):
     for path, m in pending():
         if m["session_id"] == session and take(path, m):
-            if not drop:
+            dest = os.path.join(CLAIMED, f"{session}.json")
+            if drop:
+                if os.path.exists(dest):
+                    try:
+                        os.remove(dest)
+                    except OSError:
+                        pass
+                log(f"drop {session}")
+            else:
                 print(json.dumps({"cwd": m["cwd"], "cmd": resume_cmd(m)}, ensure_ascii=False))
             return
     sys.exit(3)  # gone meanwhile (resumed elsewhere, or dropped)
@@ -879,10 +988,16 @@ def main():
         cmd_waiting()
     elif cmd in ("take", "drop"):
         cmd_take(a[1], drop=cmd == "drop")
+    elif cmd == "preserve":
+        cmd_preserve(a[1] if len(a) > 1 else None)
     elif cmd == "context":
         cmd_context(a[1], a[2] if len(a) > 2 and a[2] != "--last" else "", last="--last" in a)
     elif cmd == "running":
         cmd_running(a[1])
+    elif cmd == "freeze":
+        cmd_freeze(a[1], a[2])
+    elif cmd == "thaw":
+        cmd_thaw(a[1], a[2])
     elif cmd == "resume-cmd":
         cmd_resume_cmd(*a[1:4])
     elif cmd == "launchers":

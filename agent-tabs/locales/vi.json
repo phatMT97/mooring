@@ -7,5 +7,6 @@
   "none_here": "Không có session nào chờ ở {dir}",
   "none": "Không có session nào đang chờ khôi phục.",
   "none_open": "Không có session nào đang chờ khôi phục (có thể các tab khác đã tự mở lại rồi).",
-  "waiting_here": "↻ Có {n} session agent đang chờ ở thư mục này — gõ agent-resume để mở lại"
+  "waiting_here": "↻ Có {n} session agent đang chờ ở thư mục này — gõ agent-resume để mở lại",
+  "resume_failed": "[Mooring] Không thể khởi chạy session “{label}” (mã lỗi: {rc}).\nLệnh: {cmd}\nSession ID: {sid}\nĐể thử lại thủ công, hãy chạy lại lệnh trên hoặc gõ: agent-resume"
 }

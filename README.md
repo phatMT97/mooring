@@ -46,8 +46,10 @@ No AI inside the app, no account, about 6 MB.
   with spaces too), a **scroll handle** for full-screen TUIs that pulls faster the further you drag.
 - **Calm by default.** Ten themes (Mocha, Tokyo Night, Rosé Pine, Nord, Gruvbox, Midnight, Neon,
   Latte, Rosé Dawn, Paper) with live preview; English and Vietnamese UI.
-- **Fast.** WebGL rendering for the tabs on screen, PTY output streamed as raw bytes and batched
-  in bursts, one window per app (launching it again brings the running one up).
+- **Fast.** WebGL rendering for the tabs on screen; hidden tabs keep their buffers and status
+  updates while their terminal views stay detached. Restored background tabs create their views
+  on first use. PTY output streams as raw bytes batched in bursts, with one window per app
+  (launching it again brings the running one up).
 
 ## Keyboard
 

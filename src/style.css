@@ -184,6 +184,8 @@ body.sidebar-auto #pane.peek {
   letter-spacing: .02em;
   transition: background .15s, color .15s, opacity .15s;
 }
+.avatar .mono { display: grid; place-items: center; width: 100%; height: 100%; }
+.avatar .mono svg.i { width: 16px; height: 16px; }
 .tab.active .avatar { background: var(--tc); color: var(--on-accent); box-shadow: none; }
 .avatar.exited { opacity: .4; filter: grayscale(.6); }
 
@@ -214,23 +216,29 @@ body.sidebar-auto #pane.peek {
   box-shadow: 0 0 0 2px var(--side), 0 0 10px var(--needs);
   animation: pulse 1.6s ease-in-out infinite;
 }
-/* working: a light running around the avatar's rounded border */
-@property --orbit { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+/* working: a light running around the avatar's rounded border (GPU-composited with 0 repaints) */
 .avatar.working::after {
   content: "";
   position: absolute;
   inset: -3px;
   border-radius: 13px;
   padding: 2px;
-  background: conic-gradient(from var(--orbit), transparent 0deg 200deg, var(--tc) 300deg, var(--text) 355deg, transparent 360deg);
+  background: conic-gradient(transparent 0deg 200deg, var(--tc) 300deg, var(--text) 355deg, transparent 360deg);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  animation: orbit 1.6s linear infinite;
+  animation: spin 1.6s linear infinite;
   animation-delay: var(--phase, 0ms);
+  will-change: transform;
+  pointer-events: none;
 }
-@keyframes orbit { to { --orbit: 360deg; } }
 body.sidebar-auto #pane:not(.peek) .avatar.working::after { border-radius: 15px; }
+
+/* hibernated / sleeping tabs: dimmed with dashed avatar border */
+.tab.hibernated { opacity: .72; }
+.tab.hibernated .avatar { border-style: dashed; filter: grayscale(.3); }
+.tab.hibernated:hover { opacity: .95; }
+.tab.frozen { opacity: .88; }
 
 .label { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .label .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }

@@ -7,5 +7,6 @@
   "none_here": "No session waiting in {dir}",
   "none": "No sessions waiting to resume.",
   "none_open": "No sessions waiting to resume (other tabs may have reopened them already).",
-  "waiting_here": "↻ {n} agent session(s) waiting in this folder — type agent-resume to reopen"
+  "waiting_here": "↻ {n} agent session(s) waiting in this folder — type agent-resume to reopen",
+  "resume_failed": "[Mooring] Failed to resume session “{label}” (exit code: {rc}).\nCommand: {cmd}\nSession ID: {sid}\nTo retry manually, run the command above or type: agent-resume"
 }

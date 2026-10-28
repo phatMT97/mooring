@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node tests/agent-restart.test.js && node tests/web-links.test.js",
+    "test": "node tests/agent-restart.test.js && node tests/web-links.test.js && node tests/terminal-views.test.js",
     "build": "vite build",
     "tauri": "tauri",
     "build:win": "tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --no-bundle"

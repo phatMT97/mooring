@@ -7,7 +7,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, availableMonitors as getAvailableMonitors, currentMonitor } from "@tauri-apps/api/window";
 import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 import { getName, getIdentifier } from "@tauri-apps/api/app";
-import { attachLinks } from "./links.js";
+import { attachLinks, getSelectedText, findLinkAtEvent } from "./links.js";
 import { attachScrub } from "./scrub.js";
 import { confirmDialog } from "./confirm.js";
 import { icons, hydrateIcons } from "./icons.js";
@@ -19,6 +19,7 @@ import { toggleShortcuts } from "./shortcuts.js";
 import { togglePalette } from "./palette.js";
 import { t, setLang, defaultLang, translateDom } from "./i18n.js";
 import { createAgentRestarter } from "./agent-restart.js";
+import { createTerminalViews, backgroundAction } from "./terminal-views.js";
 
 // One accent per repo (sidebar, header, frame) and a faint tint of it behind the terminal,
 // both taken from the current theme (themes.js).
@@ -79,8 +80,8 @@ function baseName(p) {
 
 function displayTitle(tab) {
   const t = (tab.title || "").replace(/^[^\p{L}\p{N}]+/u, "").trim(); // drop the agent's status glyph
-  // A bare shell titles itself "user@host: dir" (bash) or with its exe path (PowerShell): show the folder.
-  if (!t || /^\S+@\S+:/.test(t) || /powershell\.exe$/i.test(t)) return baseName(tab.cwd || "~");
+  // A bare shell titles itself "user@host: dir" (bash) or with its exe path (PowerShell/WSL/cmd): show the folder.
+  if (!t || /^\S+@\S+:/.test(t) || /(?:powershell|wsl|cmd)\.exe$/i.test(t)) return baseName(tab.cwd || "~");
   return t;
 }
 
@@ -97,7 +98,9 @@ let saveTimer = null;
 function persist() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    state.tabs = [...tabs.values()].map(({ id, shell, cwd, title, pinned, color }) => ({ id, shell, cwd, title, pinned, color }));
+    state.tabs = [...tabs.values()].map(({ id, shell, cwd, title, pinned, color, agentTool, agentLauncher, sessionId, sessionTitle, hibernated }) => ({
+      id, shell, cwd, title, pinned, color, agentTool, agentLauncher, sessionId, sessionTitle, hibernated: !!hibernated,
+    }));
     invoke("save_state", { json: JSON.stringify(state) });
   }, 300);
 }
@@ -107,44 +110,53 @@ function persist() {
 let wslHome = null;
 
 // `show: false` opens it in the background (restore at launch, the new half of a split).
-async function openTab({ shell, cwd = "", title = "", pinned = false, color = null, id = state.nextId++, show = true }) {
+async function openTab({
+  shell, cwd = "", title = "", pinned = false, color = null, id = state.nextId++, show = true,
+  agentTool = null, agentLauncher = null, sessionId = null, sessionTitle = null, hibernated = false,
+}) {
   state.nextId = Math.max(state.nextId, id + 1);
   const el = document.createElement("div");
   el.className = "term";
-  document.getElementById("terminals").append(el);
 
   const term = new Terminal({
     fontFamily: "'Cascadia Mono', Consolas, monospace",
     fontSize: state.fontSize,
     lineHeight: 1.15,
-    scrollback: 10000,
+    scrollback: 3000,
     cursorBlink: true,
     allowProposedApi: true,
     theme: termTheme(theme.ui.layer),
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
-  term.open(el);
   attachScrub(el, term);
   const label = document.createElement("div");
   label.className = "pane-label";
   label.innerHTML = `<span class="pl-repo"></span><span class="pl-title"></span>`;
   el.append(label);
 
-  const tab = { id, shell, cwd, title, pinned, color, el, term, fit, label, root: null, colors: colorsFor(null), status: "idle", webgl: null, painted: null };
+  const tab = {
+    id, shell, cwd, title, pinned, color, el, term, fit, label,
+    root: null, colors: colorsFor(null), status: hibernated ? "hibernated" : "idle", webgl: null, painted: null,
+    agentTool, agentLauncher, sessionId, sessionTitle, hibernated, frozen: false,
+    visible: false, hiddenSince: Date.now(),
+  };
   tabs.set(id, tab);
   attachSearch(tab);
-  // clicking into the other half of a split moves the focus there
-  term.textarea?.addEventListener("focus", () => { if (state.active !== id) activate(id); });
   attachLinks(term, {
     shell: () => tab.shell,
     cwd: () => tab.cwd,
     toWin: toWinPath,
     home: async () => (tab.shell === "wsl" ? (wslHome ??= await invoke("wsl_home", { distro: state.distro })) : null),
     onError: (e) => toast(t("link.openFailed", { e: String(e?.message ?? e) })),
+    t,
   });
 
   term.onData((data) => {
+    if (tab.hibernated) {
+      if (data.includes("\r") || data.includes(" ")) wakeTab(tab);
+      return;
+    }
     if (tab.restarting) return;
     if (data.includes("\r")) tab.atPrompt = false; // a command line was sent
     invoke("pty_write", { id, data }).catch(() => {});
@@ -169,15 +181,31 @@ async function openTab({ shell, cwd = "", title = "", pinned = false, color = nu
   term.parser.registerOscHandler(11, () => true);
   term.parser.registerOscHandler(111, () => true);
   term.attachCustomKeyEventHandler((e) => clipboardKeys(e, tab));
-  el.addEventListener("contextmenu", (e) => { e.preventDefault(); paste(tab); });
+  el.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    if (tab.term.hasSelection()) {
+      copyText(getSelectedText(tab.term));
+      tab.term.clearSelection();
+    } else {
+      const link = findLinkAtEvent(tab.term, e, el);
+      if (link) {
+        copyText(link);
+        toast(t("link.copied"));
+      } else {
+        paste(tab);
+      }
+    }
+  });
 
   if (shell === "wsl" && cwd) tab.cwd = toLinuxPath(cwd) ?? cwd; // older states stored C:\ paths
   if (tab.cwd) await resolveRepo(tab, shell === "wsl" ? toWinPath(tab.cwd) : tab.cwd);
   if (show) activate(id);
-  else el.classList.add("measure"); // laid out but invisible, so the shell starts at the right size
-  fit.fit();
-  el.classList.remove("measure");
-  await spawn(tab);
+  if (!tab.hibernated) terminalViews.prepare(tab);
+  if (!tab.hibernated) {
+    await spawn(tab);
+  } else {
+    tab.term.write(`\r\n\x1b[36m[Mooring] 🌙 ${t("tab.hibernate")}\x1b[0m\r\n\x1b[2mPress Enter or click to wake.\x1b[0m\r\n`);
+  }
   persist();
   return tab;
 }
@@ -190,7 +218,51 @@ async function spawn(tab) {
   await invoke("pty_spawn", {
     output, id: tab.id, shell: tab.shell, cwd: tab.cwd || "", distro: state.distro,
     cols: tab.term.cols, rows: tab.term.rows, restoring, lang: state.lang,
+    session: tab.sessionId || null,
   }).catch((e) => tab.term.write(`\r\n[Mooring] ${t("term.spawnFailed", { e })}\r\n`));
+}
+
+async function hibernateTab(tab) {
+  if (tab.hibernated) return;
+  tab.hibernated = true;
+  tab.status = "hibernated";
+  if (tab.frozen) await thawTab(tab);
+  await invoke("pty_kill", { id: tab.id }).catch(() => {});
+  tab.term.write(`\r\n\x1b[36m[Mooring] 🌙 ${t("tab.hibernate")}\x1b[0m\r\n\x1b[2mPress Enter or click to wake.\x1b[0m\r\n`);
+  render();
+  persist();
+}
+
+async function wakeTab(tab) {
+  if (!tab.hibernated) return;
+  tab.hibernated = false;
+  tab.status = "idle";
+  tab.term.write("\r\n\x1b[32m[Mooring] ⚡ Resuming session...\x1b[0m\r\n");
+  await spawn(tab);
+  if (tab.sessionId) {
+    const cmd = tab.agentLauncher
+      ? launcherCommand(tab, tab.agentLauncher)
+      : (tab.agentTool === "codex" ? `codex resume ${tab.sessionId}` : `${tab.agentTool || "agent"} --resume ${tab.sessionId}`);
+    queueCommand(tab, cmd);
+  }
+  render();
+  persist();
+}
+
+async function freezeTab(tab) {
+  if (tab.frozen || tab.hibernated || tab.visible || tab.status === "working") return;
+  if (tab.shell !== "wsl") return;
+  tab.frozen = true;
+  await invoke("agent_tabs", { distro: state.distro, args: ["freeze", tab.id.toString(), appId] }).catch(() => {});
+  render();
+}
+
+async function thawTab(tab) {
+  if (!tab.frozen) return;
+  tab.frozen = false;
+  if (tab.shell !== "wsl") return;
+  await invoke("agent_tabs", { distro: state.distro, args: ["thaw", tab.id.toString(), appId] }).catch(() => {});
+  render();
 }
 
 // Process identity covers all tools; title glyphs bridge the gap before the next process scan.
@@ -198,24 +270,54 @@ function hasAgent(tab) {
   return !!tab.agentTool || (!tab.atPrompt && /^[^\p{L}\p{N}\s]/u.test(tab.title || ""));
 }
 
+let refreshingAgents = false;
 async function refreshAgents() {
-  const json = await invoke("agent_tabs", { distro: state.distro, args: ["running", appId] }).catch(() => "");
-  if (!json) return; // an unavailable helper must not erase known identities
-  const live = new Map(JSON.parse(json).map((x) => [Number(x.tab), x]));
-  let changed = false;
-  for (const tab of tabs.values()) {
-    if (tab.shell !== "wsl" || tab.restarting) continue;
-    const agent = live.get(tab.id);
-    const launchers = agent?.launchers ?? (agent?.launcher ? [agent.launcher] : []);
-    if (tab.agentTool !== (agent?.tool ?? null) || tab.agentLauncher !== (agent?.launcher ?? null)
-      || JSON.stringify(tab.agentLaunchers) !== JSON.stringify(launchers)) {
-      tab.agentTool = agent?.tool ?? null;
-      tab.agentLauncher = agent?.launcher ?? null;
-      tab.agentLaunchers = launchers;
-      changed = true;
+  if (refreshingAgents) return;
+  refreshingAgents = true;
+  try {
+    const json = await invoke("agent_tabs", { distro: state.distro, args: ["running", appId] }).catch(() => "");
+    if (!json) return; // an unavailable helper must not erase known identities
+    const live = new Map(JSON.parse(json).map((x) => [Number(x.tab), x]));
+    let changed = false;
+    for (const tab of tabs.values()) {
+      if (tab.shell !== "wsl" || tab.restarting) continue;
+      const agent = live.get(tab.id);
+      const launchers = agent?.launchers ?? (agent?.launcher ? [agent.launcher] : []);
+      const tool = agent?.tool ?? null;
+      const launcher = agent?.launcher ?? null;
+      const sid = agent?.session ?? null;
+      const sTitle = agent?.title ?? null;
+      if (tab.agentTool !== tool || tab.agentLauncher !== launcher
+        || JSON.stringify(tab.agentLaunchers) !== JSON.stringify(launchers)
+        || (sid && tab.sessionId !== sid) || (sTitle && tab.sessionTitle !== sTitle)) {
+        tab.agentTool = tool;
+        tab.agentLauncher = launcher;
+        tab.agentLaunchers = launchers;
+        if (sid) tab.sessionId = sid;
+        if (sTitle) tab.sessionTitle = sTitle;
+        changed = true;
+      }
     }
+    if (changed) {
+      render();
+      persist();
+    }
+  } finally {
+    refreshingAgents = false;
   }
-  if (changed) render();
+}
+
+let agentPollTimer = null;
+function scheduleAgentPoll(delay = 15000) {
+  clearTimeout(agentPollTimer);
+  agentPollTimer = setTimeout(async () => {
+    if (document.hasFocus()) {
+      await refreshAgents().catch(() => {});
+      scheduleAgentPoll(15000);
+    } else {
+      scheduleAgentPoll(45000);
+    }
+  }, delay);
 }
 
 const { restartAgent, restartAll } = createAgentRestarter({
@@ -232,6 +334,19 @@ async function restartFromUi(tab, launcher = null) {
 
 function agentLabel(tab) {
   return tab.agentTool === "claude" ? (tab.agentLauncher || "claude") : tab.agentTool;
+}
+
+function agentToolName(tab) {
+  if (tab.agentTool) return tab.agentTool;
+  const l = (tab.agentLauncher || "").toLowerCase();
+  if (l.includes("claude")) return "claude";
+  if (l.includes("codex")) return "codex";
+  if (l.includes("agy")) return "agy";
+  const t = (tab.title || "").toLowerCase();
+  if (t.includes("claude")) return "claude";
+  if (t.includes("codex")) return "codex";
+  if (t.includes("agy")) return "agy";
+  return null;
 }
 
 function launcherChoices(tab) {
@@ -269,11 +384,17 @@ async function closeTab(id) {
   }
   render();
   persist();
+  refreshWaiting();
 }
 
 function activate(id) {
   const tab = tabs.get(id);
   if (!tab) return;
+  if (tab.hibernated) {
+    wakeTab(tab);
+  } else if (tab.frozen) {
+    thawTab(tab);
+  }
   // in a split, a tab from outside replaces the half that had the focus
   const split = state.split;
   if (split && !split.ids.includes(id)) split.ids[Math.max(0, split.ids.indexOf(state.active))] = id;
@@ -281,15 +402,26 @@ function activate(id) {
   tab.lastActive = Date.now();
   if (tab.status === "needs") tab.status = "idle";
   layout();
-  requestAnimationFrame(() => { if (document.activeElement !== tab.term.textarea) tab.term.focus(); });
+  requestAnimationFrame(() => {
+    if (document.activeElement !== tab.term.textarea) tab.term.focus();
+    tab.term.refresh(0, tab.term.rows - 1);
+  });
   render();
   persist();
+  scheduleAgentPoll(300);
 }
 
 // ---- layout: one tab, or two in a split ------------------------------------
 
 const area = document.getElementById("terminals");
 const divider = document.getElementById("divider");
+const terminalViews = createTerminalViews({
+  container: area,
+  onOpen: (tab) => {
+    // Clicking into the other half of a split moves the focus there.
+    tab.term.textarea?.addEventListener("focus", () => { if (state.active !== tab.id) activate(tab.id); });
+  },
+});
 
 function visibleTabs() {
   return (state.split ? state.split.ids : [state.active]).map((id) => tabs.get(id)).filter(Boolean);
@@ -308,8 +440,12 @@ function layout() {
     t.el.classList.toggle("focused", !!split && t.id === state.active);
     t.el.dataset.slot = slot;
     if (slot >= 0) {
+      terminalViews.show(t);
       paintTerm(t);
       setWebgl(t, true);
+    } else {
+      terminalViews.hide(t);
+      setWebgl(t, false);
     }
   }
   fitVisible();
@@ -318,7 +454,12 @@ function layout() {
 let fitFrame = 0;
 function fitVisible() {
   cancelAnimationFrame(fitFrame);
-  fitFrame = requestAnimationFrame(() => { for (const t of visibleTabs()) t.fit.fit(); });
+  fitFrame = requestAnimationFrame(() => {
+    for (const t of visibleTabs()) {
+      terminalViews.fit(t);
+      t.term.refresh(0, t.term.rows - 1);
+    }
+  });
 }
 
 function splitWith(id, dir = state.split?.dir || "row") {
@@ -394,54 +535,37 @@ divider.addEventListener("dblclick", () => {
 });
 
 // ---- rendering speed: GPU (WebGL) for what is on screen --------------------
-// Browsers cap live WebGL contexts (~16), so only the last few shown tabs keep one;
-// the rest fall back to the DOM renderer, which costs nothing while hidden.
+// Only visible tabs keep a WebGL context; hidden tabs fall back to the DOM renderer
+// which costs nothing while hidden. This avoids hitting browser WebGL limits (~16)
+// and prevents canvas buffer invalidation on display: none.
 
-const WEBGL_KEEP = 10;
-let webglRecent = [];
-
-// `warm`: getting a background tab ready ahead of time; it never pushes out a tab already in use.
-function setWebgl(tab, on, warm = false) {
+function setWebgl(tab, on) {
   if (on) {
-    if (warm) {
-      if (tab.webgl || tab.noWebgl || webglRecent.length >= WEBGL_KEEP) return;
-      webglRecent.push(tab);
-    } else {
-      webglRecent = [tab, ...webglRecent.filter((t) => t !== tab)];
-      for (const old of webglRecent.splice(WEBGL_KEEP)) setWebgl(old, false);
-    }
     if (tab.webgl || tab.noWebgl) return;
     try {
       const addon = new WebglAddon();
-      addon.onContextLoss(() => { addon.dispose(); tab.webgl = null; });
+      addon.onContextLoss(() => {
+        addon.dispose();
+        tab.webgl = null;
+        tab.term.refresh(0, tab.term.rows - 1);
+      });
       tab.term.loadAddon(addon);
       tab.webgl = addon;
+      tab.webglFailures = 0;
+      tab.term.refresh(0, tab.term.rows - 1);
     } catch {
-      tab.noWebgl = true; // no GPU path here: stay on the DOM renderer
+      tab.webglFailures = (tab.webglFailures || 0) + 1;
+      if (tab.webglFailures >= 3) {
+        tab.noWebgl = true; // only fall back to DOM renderer after multiple consecutive failures
+      }
+      tab.term.refresh(0, tab.term.rows - 1);
     }
   } else {
-    webglRecent = webglRecent.filter((t) => t !== tab);
-    tab.webgl?.dispose();
-    tab.webgl = null;
-  }
-}
-
-// After a restore every tab but one is still cold: its first click would pay for a GPU context,
-// a glyph atlas in the theme's colours and a refit all at once. Do that work while the app idles,
-// one tab at a time, laid out but invisible.
-function warmUp(queue = [...tabs.values()]) {
-  const tab = queue.shift();
-  if (!tab) return;
-  requestIdleCallback(() => {
-    if (tabs.has(tab.id) && !tab.el.classList.contains("active")) {
-      tab.el.classList.add("measure");
-      paintTerm(tab);
-      setWebgl(tab, true, true);
-      tab.fit.fit();
-      tab.el.classList.remove("measure");
+    if (tab.webgl) {
+      tab.webgl.dispose();
+      tab.webgl = null;
     }
-    warmUp(queue);
-  }, { timeout: 1000 });
+  }
 }
 
 function setFontSize(size) {
@@ -458,6 +582,7 @@ async function setCwd(tab, reported) {
   await resolveRepo(tab, reported);
   render();
   persist();
+  scheduleAgentPoll(300);
 }
 
 async function resolveRepo(tab, winPath) {
@@ -513,6 +638,13 @@ function flagNeeds(tab) {
 
 // ---- clipboard and keys the terminal can't express ------------------------------
 
+function copyText(text) {
+  if (!text) return;
+  invoke("clipboard_write", { text }).catch(() => {
+    navigator.clipboard?.writeText(text).catch(() => {});
+  });
+}
+
 function paste(tab) {
   invoke("clipboard_read").then((text) => text && tab.term.paste(text)).catch(() => {});
 }
@@ -521,12 +653,18 @@ function clipboardKeys(e, tab) {
   if (e.type !== "keydown") return true;
   if (tab.restarting) return false;
   const k = e.key.toLowerCase();
-  if (e.ctrlKey && k === "c" && tab.term.hasSelection()) {
-    invoke("clipboard_write", { text: tab.term.getSelection() }).catch(() => {});
-    tab.term.clearSelection();
+  if ((e.ctrlKey && k === "c") || (e.ctrlKey && e.key === "Insert")) {
+    if (tab.term.hasSelection()) {
+      copyText(getSelectedText(tab.term));
+      tab.term.clearSelection();
+      return false;
+    }
+  }
+  if ((e.ctrlKey && k === "v") || (e.shiftKey && e.key === "Insert")) {
+    paste(tab);
+    e.preventDefault();
     return false;
   }
-  if (e.ctrlKey && k === "v") { paste(tab); e.preventDefault(); return false; }
   // Ctrl/Shift+Enter: a new line in an agent's prompt instead of sending it. The terminal would
   // send these as a plain Enter; a line feed (Ctrl+J) is what Claude Code, Codex and agy take
   // as "newline here".
@@ -639,6 +777,12 @@ async function refreshWaiting() {
   waitingAt = Date.now();
   const json = await invoke("agent_tabs", { distro: state.distro, args: ["waiting"] }).catch(() => "");
   try { waiting = json ? JSON.parse(json) : []; } catch { waiting = []; }
+  // Exclude sessions already associated with open tabs in Mooring
+  const openSessions = new Set();
+  for (const tab of tabs.values()) {
+    if (tab.sessionId) openSessions.add(tab.sessionId);
+  }
+  waiting = waiting.filter((w) => !openSessions.has(w.session));
   for (const w of waiting) w.root ??= await invoke("repo_root", { path: toWinPath(w.cwd) }).catch(() => null);
   renderWaiting();
 }
@@ -685,7 +829,14 @@ function renderWaiting() {
     const name = waitingName(w);
     row.innerHTML = `<span class="avatar"><span class="mono"></span></span><span class="label"><span class="title"></span><span class="sub"></span></span>`
       + `<button class="pin" data-i18n-label="waiting.resume">${icons.play}</button><button class="close" data-i18n-label="waiting.drop">${icons.x}</button>`;
-    row.querySelector(".mono").textContent = monogram(baseName(w.root || w.cwd));
+    const waitTool = w.tool;
+    const waitIco = waitTool && icons[waitTool];
+    if (waitIco) {
+      row.querySelector(".mono").innerHTML = waitIco;
+      row.querySelector(".avatar").classList.add("agent-avatar", `agent-${waitTool}`);
+    } else {
+      row.querySelector(".mono").textContent = monogram(baseName(w.root || w.cwd));
+    }
     row.querySelector(".title").textContent = name;
     row.querySelector(".sub").textContent = `${w.tool} · ${baseName(w.cwd)}`;
     row.title = `${name}\n${w.cwd}\n${w.cmd}`;
@@ -721,10 +872,17 @@ async function resumeWaiting(w, refresh = true) {
       && x.status !== "exited" && !x.queued && !x.restarting);
     if (idle) {
       idle.atPrompt = false;
+      idle.sessionId = w.session;
+      idle.sessionTitle = w.title;
+      idle.agentTool = w.tool;
       invoke("pty_write", { id: idle.id, data: cmd + "\r" }).catch(() => {});
       activate(idle.id);
+      persist();
     } else {
-      queueCommand(await openTab({ shell: "wsl", cwd }), cmd);
+      const newTab = await openTab({
+        shell: "wsl", cwd, sessionId: w.session, sessionTitle: w.title, agentTool: w.tool,
+      });
+      queueCommand(newTab, cmd);
     }
   }
   if (refresh) refreshWaiting();
@@ -1052,6 +1210,7 @@ function reorder(ids) {
   for (const [id, t] of entries) tabs.set(id, t);
   render();
   persist();
+  scheduleAgentPoll(300);
 }
 
 // Move `moving` (tab ids, kept in their order) before/after the tab `targetId`.
@@ -1067,6 +1226,7 @@ function togglePin(tab) {
   tab.pinned = !tab.pinned;
   render();
   persist();
+  scheduleAgentPoll(300);
 }
 
 let drag = null; // { target, el, ghost, startY, over, after } while a pointer drag is in progress
@@ -1156,17 +1316,30 @@ function toggleGroup(key, fold = !collapsedGroups().has(key)) {
   state.collapsed = fold ? [...keep, key] : keep;
   render();
   persist();
+  scheduleAgentPoll(300);
 }
 
 function setAllGroups(fold) {
   state.collapsed = fold ? [...new Set(orderedTabs().map(groupKey))] : [];
   render();
   persist();
+  scheduleAgentPoll(300);
 }
 
 const collapsedGroups = () => new Set(state.collapsed ?? []);
 
+let renderPending = false;
 function render() {
+  if (renderPending) return;
+  renderPending = true;
+  const schedule = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
+  schedule(() => {
+    renderPending = false;
+    renderNow();
+  });
+}
+
+function renderNow() {
   const nav = document.getElementById("groups");
   nav.replaceChildren();
   const collapsed = collapsedGroups();
@@ -1212,13 +1385,25 @@ function render() {
     }
     if (collapsed.has(key) && tab.id !== state.active && !state.split?.ids.includes(tab.id)) continue;
     const row = document.createElement("div");
-    row.className = "tab" + (tab.id === state.active ? " active" : state.split?.ids.includes(tab.id) ? " paired" : "");
+    row.className = "tab" + (tab.id === state.active ? " active" : state.split?.ids.includes(tab.id) ? " paired" : "")
+      + (tab.hibernated ? " hibernated" : tab.frozen ? " frozen" : "");
     row.style.setProperty("--tc", tab.colors.accent);
     row.innerHTML = `${avatarHtml(tab)}<span class="label"><span class="title"></span><span class="sub"></span></span><button class="pin" aria-label="${tab.pinned ? t("tab.unpin") : t("tab.pin")}" title="${tab.pinned ? t("tab.unpin") : t("tab.pin")}">${tab.pinned ? icons.pinOff : icons.pin}</button><button class="close" aria-label="${t("menu.close")}" title="${t("tab.close")}">${icons.x}</button>`;
-    row.querySelector(".mono").textContent = monogram(tab.root ? baseName(tab.root) : displayTitle(tab));
+    const tool = agentToolName(tab);
+    const agentIco = tool && icons[tool];
+    if (agentIco) {
+      row.querySelector(".mono").innerHTML = agentIco;
+      row.querySelector(".avatar").classList.add("agent-avatar", `agent-${tool}`);
+    } else {
+      row.querySelector(".mono").textContent = monogram(tab.root ? baseName(tab.root) : displayTitle(tab));
+    }
     row.querySelector(".title").textContent = displayTitle(tab);
-    row.querySelector(".sub").textContent = [shellName(tab), agentLabel(tab), baseName(tab.cwd || "~")].filter(Boolean).join(" · ");
-    row.onpointerenter = () => (row.title = tabTooltip(tab)); // built on hover so the time is current
+    const subParts = [shellName(tab)];
+    if (tab.hibernated) subParts.push("🌙 " + (agentLabel(tab) || "sleeping"));
+    else subParts.push(agentLabel(tab));
+    subParts.push(baseName(tab.cwd || "~"));
+    row.querySelector(".sub").textContent = subParts.filter(Boolean).join(" · ");
+    row.onpointerenter = () => (row.title = tab.hibernated ? `${displayTitle(tab)} (🌙 ${t("tab.hibernate")})` : tabTooltip(tab));
     row.onclick = (e) => {
       if (suppressClick) return;
       if (e.target.closest(".close")) return closeTab(tab.id);
@@ -1236,6 +1421,7 @@ function render() {
         pinned: tab.pinned,
         canSplit: tab.id !== state.active && !state.split?.ids.includes(tab.id),
         onShare: tab.id !== state.active ? () => shareContext(tab, tabs.get(state.active)) : null,
+        onHibernate: tab.shell === "wsl" && (hasAgent(tab) || tab.sessionId) ? () => (tab.hibernated ? wakeTab(tab) : hibernateTab(tab)) : null,
         onRestart: tab.shell === "wsl" && hasAgent(tab) ? () => restartFromUi(tab) : null,
         restartLaunchers: launcherChoices(tab),
         launcherCommand: (launcher) => launcherCommand(tab, launcher),
@@ -1385,12 +1571,27 @@ async function placeWindow(g) {
 
 await listen("pty-exit", ({ payload: id }) => {
   const tab = tabs.get(id);
-  if (!tab) return;
+  if (!tab || tab.hibernated) return;
   tab.status = "exited";
-  tab.term.write(`\r\n\x1b[2m[${t("term.exited")}]\x1b[0m\r\n`);
+  tab.term.write("\x1b[?1049l\x1b[?25h");
+  if (tab.sessionId) {
+    const resumeCmd = tab.agentLauncher
+      ? launcherCommand(tab, tab.agentLauncher)
+      : `${tab.agentTool || "agent"} resume ${tab.sessionId}`;
+    tab.term.write(`\r\n\x1b[33m[Mooring] ${t("term.sessionExited", {
+      name: tab.sessionTitle || tab.sessionId.slice(0, 8),
+      cmd: resumeCmd,
+    })}\x1b[0m\r\n`);
+  } else if (tab.agentTool || tab.agentLauncher) {
+    const tool = tab.agentLauncher || tab.agentTool;
+    tab.term.write(`\r\n\x1b[33m[Mooring] ${t("term.agentExited", { tool })}\x1b[0m\r\n`);
+  } else {
+    tab.term.write(`\r\n\x1b[2m[${t("term.exited")}]\x1b[0m\r\n`);
+  }
   const sub = tab.term.onKey(({ domEvent }) => {
     if (domEvent.key === "Enter") { sub.dispose(); spawn(tab); render(); }
   });
+  tab.term.refresh(0, tab.term.rows - 1);
   render();
 });
 
@@ -1480,13 +1681,25 @@ win.onCloseRequested(async (event) => {
 // (Agents cut off then stay queued in agent-tabs either way: `agent-resume` picks one up later.)
 // Resolves to the tabs to reopen (each has a checkbox, all ticked); none means a fresh tab.
 function askRestore(list) {
-  const agents = list.filter(hasAgent).length;
-  const items = list.map((x) => ({
-    name: displayTitle(x),
-    note: hasAgent(x) ? "agent" : shellName(x),
-    color: x.shell === "wsl" ? "var(--wsl)" : "var(--ps)",
-    checked: true,
-  }));
+  const agents = list.filter((x) => hasAgent(x) || x.sessionId).length;
+  const items = list.map((x) => {
+    let note = "";
+    if (x.sessionTitle) {
+      note = `${x.agentTool || "agent"} (${x.sessionTitle})`;
+    } else if (x.sessionId) {
+      note = `${x.agentTool || "agent"} (${x.sessionId.slice(0, 8)})`;
+    } else if (hasAgent(x)) {
+      note = "agent";
+    } else {
+      note = shellName(x);
+    }
+    return {
+      name: displayTitle(x),
+      note,
+      color: x.shell === "wsl" ? "var(--wsl)" : "var(--ps)",
+      checked: true,
+    };
+  });
   return confirmDialog({
     title: t("restore.title", { n: list.length }),
     body: agents ? t("restore.bodyAgents", { n: agents }) : t("restore.body"),
@@ -1513,14 +1726,35 @@ if (reopen.length) {
     state.split = { ids: [...split.ids], dir: split.dir === "col" ? "col" : "row", ratio: Number(split.ratio) || 0.5 };
   }
   activate(tabs.has(wanted) ? wanted : tabs.keys().next().value);
-  warmUp();
   setTimeout(refreshWaiting, 12000); // after restored tabs had their turn to claim
 } else {
   await openTab({ shell: state.defaultShell });
 }
 refreshWaiting();
 refreshAgents();
-setInterval(() => refreshAgents().catch(() => {}), 5000);
+scheduleAgentPoll(15000);
+
 // keep the list current: when the window comes back to the front, and once a minute
-window.addEventListener("focus", () => { if (Date.now() - waitingAt > 5000) refreshWaiting(); });
-setInterval(refreshWaiting, 60000);
+window.addEventListener("focus", () => {
+  refreshAgents().catch(() => {});
+  if (Date.now() - waitingAt > 5000) refreshWaiting();
+  scheduleAgentPoll(15000);
+});
+setInterval(() => {
+  if (document.hasFocus()) refreshWaiting();
+}, 60000);
+
+// Background power manager:
+// - Freezes idle WSL sessions hidden for > 3 minutes via SIGSTOP.
+// - Hibernates saved sessions hidden for > 25 minutes; activation resumes them.
+setInterval(() => {
+  const now = Date.now();
+  for (const tab of tabs.values()) {
+    const action = backgroundAction(tab, now);
+    if (action === "hibernate") {
+      hibernateTab(tab);
+    } else if (action === "freeze") {
+      freezeTab(tab);
+    }
+  }
+}, 30000);

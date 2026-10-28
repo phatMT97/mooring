@@ -7,7 +7,7 @@ import shlex
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,9 +66,9 @@ class IdentityTests(unittest.TestCase):
                 patch.object(agent, "proc_env", side_effect=lambda pid: {
                     "TERMDECK_TAB": str(pid), "TERMDECK_APP": "other" if pid == 4 else "test"}):
             self.assertEqual(output(agent.cmd_running, "test"), [
-                {"tab": "1", "tool": "claude", "launcher": "vclaude", "launchers": ["vclaude"]},
-                {"tab": "2", "tool": "codex", "launcher": "codex", "launchers": ["codex"]},
-                {"tab": "3", "tool": "agy", "launcher": "agy", "launchers": ["agy"]}])
+                {"tab": "1", "tool": "claude", "launcher": "vclaude", "launchers": ["vclaude"], "session": None, "title": None},
+                {"tab": "2", "tool": "codex", "launcher": "codex", "launchers": ["codex"], "session": None, "title": None},
+                {"tab": "3", "tool": "agy", "launcher": "agy", "launchers": ["agy"], "session": None, "title": None}])
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -165,7 +165,7 @@ test ! -e "$fixture/$$.json" || exit 11
 expected=vclaude
 vclaude --resume session-1 || exit 12
 test ! -e "$fixture/$$.json" || exit 13
-declare -f _agent_tabs_orig_nclaude | rg -q 'command nclaude --profile test' || exit 14
+declare -f _agent_tabs_orig_nclaude | grep -q 'command nclaude --profile test' || exit 14
 nclaude --resume session-1 || exit 15
 test ! -e "$fixture/$$.json" || exit 16
 expected=work-ai
@@ -178,7 +178,7 @@ declare -F nowhereclaude >/dev/null && exit 21
 exit 0
 '''
             subprocess.run(["bash", "--noprofile", "--norc", "-c",
-                            'export fixture=$1; wrapper=$2; helper=$3; export PATH="$fixture:$PATH" XDG_CONFIG_HOME="$fixture"\n' + test_script,
+                            'export fixture=$1; wrapper=$2; helper=$3; export PATH="$fixture:$PATH" XDG_CONFIG_HOME="$fixture" TERMDECK_TAB=test\n' + test_script,
                             "test", tmp, str(script), str(ROOT / "agent-tabs/agent-tabs")], check=True, timeout=5)
 
 
@@ -217,7 +217,7 @@ sys.stdin.readline()
                         self.assertEqual(plan["cmd"], "vclaude --resume same-session")
                         identities = output(agent.cmd_running, "mooring.restart.test")
                         self.assertEqual(identities, [{"tab": "987654", "tool": "claude", "launcher": "vclaude",
-                                                      "launchers": ["vclaude"]}])
+                                                      "launchers": ["vclaude"], "session": "same-session", "title": None}])
                         shell.stdin.write("/exit\n")
                         shell.stdin.flush()
                     shell.wait(timeout=5)
@@ -227,6 +227,100 @@ sys.stdin.readline()
                     shell.wait(timeout=5)
                 shell.stdin.close()
                 shell.stdout.close()
+
+
+class PreserveAndClaimTests(unittest.TestCase):
+    def test_preserve_restores_claimed_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            claimed_dir = Path(tmp) / "claimed"
+            run_dir.mkdir()
+            claimed_dir.mkdir()
+            with patch.object(agent, "RUN", str(run_dir)), patch.object(agent, "CLAIMED", str(claimed_dir)):
+                marker_path = str(run_dir / "123.json")
+                agent.save(marker_path, {"session_id": "sid-abc", "title": "Test Task", "cwd": "/repo", "tool": "codex", "launcher": "codex"})
+                # take it
+                self.assertTrue(agent.take(marker_path))
+                self.assertFalse(Path(marker_path).exists())
+                self.assertTrue((claimed_dir / "sid-abc.json").exists())
+                # preserve it back
+                agent.cmd_preserve("sid-abc")
+                preserved = run_dir / "preserved_sid-abc.json"
+                self.assertTrue(preserved.exists())
+                loaded = agent.load(str(preserved))
+                self.assertEqual(loaded["session_id"], "sid-abc")
+                self.assertEqual(loaded["title"], "Test Task")
+
+    def test_claim_prioritizes_termdeck_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            claimed_dir = Path(tmp) / "claimed"
+            run_dir.mkdir()
+            claimed_dir.mkdir()
+            with patch.object(agent, "RUN", str(run_dir)), patch.object(agent, "CLAIMED", str(claimed_dir)), \
+                    patch.object(agent, "alive", return_value=False), \
+                    patch.object(agent, "left_behind", return_value=True):
+                now = agent.time.time()
+                agent.save(str(run_dir / "1.json"), {"session_id": "sid-1", "cwd": "/repo", "tool": "codex", "launcher": "codex", "started": now})
+                agent.save(str(run_dir / "2.json"), {"session_id": "sid-2", "cwd": "/repo", "tool": "codex", "launcher": "codex", "started": now + 10})
+                with patch.dict(agent.os.environ, {"TERMDECK_TAB": "10", "TERMDECK_RESTORING": "1", "TERMDECK_SESSION": "sid-1"}):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        agent.cmd_claim("/repo")
+                    parts = out.getvalue().strip().split("\t")
+                    self.assertEqual(parts[0], "R")
+                    self.assertEqual(parts[3], "sid-1")
+                    self.assertEqual(parts[4], "codex")
+
+    def test_claim_with_termdeck_session_by_hand(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            claimed_dir = Path(tmp) / "claimed"
+            run_dir.mkdir()
+            claimed_dir.mkdir()
+            with patch.object(agent, "RUN", str(run_dir)), patch.object(agent, "CLAIMED", str(claimed_dir)), \
+                    patch.object(agent, "alive", return_value=False), \
+                    patch.object(agent, "left_behind", return_value=True):
+                now = agent.time.time()
+                agent.save(str(run_dir / "1.json"), {"session_id": "sid-target", "cwd": "/repo", "tool": "codex", "launcher": "codex", "started": now})
+                # Not restoring, opened by hand: should still take sid-target directly
+                with patch.dict(agent.os.environ, {"TERMDECK_TAB": "10", "TERMDECK_SESSION": "sid-target"}, clear=True):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        agent.cmd_claim("/repo")
+                    parts = out.getvalue().strip().split("\t")
+                    self.assertEqual(parts[0], "R")
+                    self.assertEqual(parts[3], "sid-target")
+
+    def test_claim_with_target_session_does_not_steal_unrelated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp) / "run"
+            claimed_dir = Path(tmp) / "claimed"
+            run_dir.mkdir()
+            claimed_dir.mkdir()
+            with patch.object(agent, "RUN", str(run_dir)), patch.object(agent, "CLAIMED", str(claimed_dir)), \
+                    patch.object(agent, "alive", return_value=False), \
+                    patch.object(agent, "left_behind", return_value=True):
+                now = agent.time.time()
+                agent.save(str(run_dir / "1.json"), {"session_id": "sid-other", "cwd": "/repo", "tool": "codex", "launcher": "codex", "started": now})
+                with patch.dict(agent.os.environ, {"TERMDECK_TAB": "10", "TERMDECK_SESSION": "sid-nonexistent", "TERMDECK_RESTORING": "1", "AGENT_TABS_NO_WAIT": "1"}, clear=True):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        agent.cmd_claim("/repo")
+                    # Should NOT have claimed sid-other
+                    self.assertFalse(out.getvalue().startswith("R\t"))
+                    self.assertFalse((claimed_dir / "sid-other.json").exists())
+
+    def test_cmd_running_ignores_codex_daemon(self):
+        with patch.object(agent, "glob", MagicMock(glob=lambda p: ["/proc/5014/comm"])), \
+                patch.object(agent, "proc_comm", return_value="codex"), \
+                patch.object(agent, "running", return_value=True), \
+                patch.object(agent, "proc_cmdline", return_value=["codex", "app-server", "--managed-daemon"]), \
+                patch.object(agent, "proc_env", return_value={"TERMDECK_TAB": "56", "TERMDECK_APP": "dev.mooring"}):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                agent.cmd_running("dev.mooring")
+            self.assertEqual(out.getvalue().strip(), "[]")
 
 
 if __name__ == "__main__":

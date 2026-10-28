@@ -43,6 +43,7 @@ fn pty_spawn(
     rows: u16,
     restoring: Option<bool>,
     lang: Option<String>,
+    session: Option<String>,
 ) -> Result<(), String> {
     let pair = native_pty_system()
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -82,6 +83,10 @@ fn pty_spawn(
         // tabs reopened at launch start together; agent-tabs waits for them before reporting leftovers
         cmd.env("TERMDECK_RESTORING", "1");
         wslenv.push_str(":TERMDECK_RESTORING");
+    }
+    if let Some(session) = session.filter(|s| !s.is_empty()) {
+        cmd.env("TERMDECK_SESSION", &session);
+        wslenv.push_str(":TERMDECK_SESSION");
     }
     if app.config().identifier.ends_with(".dev") {
         // the test build must never take over sessions waiting to be resumed in the daily one
@@ -176,19 +181,24 @@ fn path_kind(path: String) -> Option<&'static str> {
 /// Open a file/folder/URL with its default handler, or reveal it selected in Explorer.
 #[tauri::command(async)]
 fn open_path(path: String, reveal: bool) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("explorer.exe");
     #[cfg(windows)]
-    {
+    let mut cmd = if reveal {
         use std::os::windows::process::CommandExt;
-        // explorer parses its own quoting: /select,"C:\a b\c"
-        if reveal {
-            cmd.raw_arg(format!("/select,\"{}\"", path));
-        } else {
-            cmd.raw_arg(format!("\"{}\"", path));
-        }
-    }
+        let mut c = std::process::Command::new("explorer.exe");
+        c.raw_arg(format!("/select,\"{}\"", path));
+        c
+    } else {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.raw_arg(format!("url.dll,FileProtocolHandler \"{}\"", path));
+        c
+    };
     #[cfg(not(windows))]
-    cmd.arg(if reveal { format!("/select,{path}") } else { path });
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(if reveal { format!("/select,{path}") } else { path });
+        c
+    };
     cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
@@ -321,9 +331,12 @@ fn load_state(app: AppHandle) -> Result<String, String> {
     Ok(std::fs::read_to_string(state_file(&app)?).unwrap_or_default())
 }
 
-// sync: saves run one after another, never two writers on the temp file
-#[tauri::command]
+static STATE_SAVE_LOCK: Mutex<()> = Mutex::new(());
+
+// Keep disk writes off the main thread and serialize access to the shared temp file.
+#[tauri::command(async)]
 fn save_state(app: AppHandle, json: String) -> Result<(), String> {
+    let _save = STATE_SAVE_LOCK.lock().unwrap();
     let path = state_file(&app)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, json).map_err(|e| e.to_string())?;

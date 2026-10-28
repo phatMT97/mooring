@@ -27,7 +27,7 @@ const SECTIONS = [
   ["sc.terminal", [
     ["Ctrl+Shift+F", "sc.find"],
     ["Enter · Shift+Enter", "sc.findStep"],
-    ["Ctrl+C @sc.k.withSelection", "sc.copy"],
+    ["Ctrl+C · @sc.k.rightClick @sc.k.withSelection", "sc.copy"],
     ["Ctrl+V · @sc.k.rightClick", "sc.paste"],
     ["Ctrl+Click", "sc.openLink"],
     ["Ctrl+Shift+Click", "sc.reveal"],

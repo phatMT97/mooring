@@ -6,7 +6,7 @@ import { dismissable } from "./popover.js";
 
 let open = null;
 
-export function showTabMenu(x, y, { accents, repoAccent, color, pinned, canSplit, onSplit, onShare, onColor, onPin, onClose, onRestart, restartLaunchers = [], currentLauncher, launcherCommand, onRestartWith }) {
+export function showTabMenu(x, y, { accents, repoAccent, color, pinned, canSplit, onSplit, onShare, onColor, onPin, onClose, onRestart, restartLaunchers = [], currentLauncher, launcherCommand, onRestartWith, onHibernate }) {
   open?.close();
   const menu = document.createElement("div");
   menu.className = "tab-menu";
@@ -26,6 +26,7 @@ export function showTabMenu(x, y, { accents, repoAccent, color, pinned, canSplit
         </div>` : ""}
     </div>` : ""}
     ${canSplit ? `<button class="tm-item tm-split" role="menuitem">${icons.splitRight}${t("menu.split")}<kbd>Ctrl+Click</kbd></button>` : ""}
+    ${onHibernate ? `<button class="tm-item tm-hibernate" role="menuitem">${icons.moon}${t("tab.hibernate")}</button>` : ""}
     <button class="tm-item tm-pin" role="menuitem">${pinned ? icons.pinOff : icons.pin}${pinned ? t("tab.unpin") : t("tab.pin")}</button>
     <button class="tm-item tm-close" role="menuitem">${icons.x}${t("menu.close")}</button>`;
   const sw = menu.querySelector(".tm-swatches");
@@ -88,6 +89,7 @@ export function showTabMenu(x, y, { accents, repoAccent, color, pinned, canSplit
     };
   }
   if (canSplit) menu.querySelector(".tm-split").onclick = () => { close(); onSplit(); };
+  if (onHibernate) menu.querySelector(".tm-hibernate").onclick = () => { close(); onHibernate(); };
   menu.querySelector(".tm-pin").onclick = () => { close(); onPin(); };
   menu.querySelector(".tm-close").onclick = () => { close(); onClose(); };
 

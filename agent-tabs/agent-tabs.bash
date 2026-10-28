@@ -72,32 +72,54 @@ unset _f _at_tool _at_alias
 # On a fresh interactive tab, pick up a session that was cut off in this directory.
 if [[ $- == *i* && -t 0 && -z "$BASH_EXECUTION_STRING" && -z "$AGENT_TABS_NO_CLAIM" && -z "$CLAUDECODE" ]]; then
   export AGENT_TABS_NO_CLAIM=1  # only the tab's first shell claims
-  IFS=$'\t' read -r _at_kind _at_label _at_cmd < <(agent-tabs claim "$PWD" 2>/dev/null)
+  IFS=$'\t' read -r _at_kind _at_label _at_cmd _at_sid _at_tool < <(agent-tabs claim "$PWD" 2>/dev/null)
   if [ "$_at_kind" = R ]; then
     # auto-resume; any key within 2s cancels
     if read -r -s -n 1 -t 2 -p "$(agent-tabs msg resume_prompt "label=$_at_label" "cmd=$_at_cmd")" _at_ans; then
       agent-tabs msg cancelled
+      agent-tabs preserve "$_at_sid" 2>/dev/null || true
     else
       echo
-      history -s "$_at_cmd"; eval "$_at_cmd"
+      history -s "$_at_cmd"
+      eval "$_at_cmd"
+      _at_rc=$?
+      printf '\e[?1049l\e[?25h\e[0m'
+      if [ $_at_rc -ne 0 ]; then
+        echo
+        echo "────────────────────────────────────────────────────────────"
+        agent-tabs msg resume_failed "label=$_at_label" "cmd=$_at_cmd" "rc=$_at_rc" "sid=$_at_sid"
+        echo "────────────────────────────────────────────────────────────"
+        echo
+        agent-tabs preserve "$_at_sid" 2>/dev/null || true
+      fi
     fi
   elif [ "$_at_kind" = H ]; then
     agent-tabs msg waiting_here "n=$_at_label"
   elif [ "$_at_kind" = N ]; then
     agent-tabs msg leftover "n=$_at_label"
   fi
-  unset _at_kind _at_label _at_cmd _at_ans
+  unset _at_kind _at_label _at_cmd _at_sid _at_tool _at_ans _at_rc
 fi
 
 # Resume a session waiting for this folder later on (e.g. one that was still running elsewhere
 # when this tab started and so was skipped at startup).
 agent-resume() {
-  local kind label cmd
-  IFS=$'\t' read -r kind label cmd < <(AGENT_TABS_NO_WAIT=1 agent-tabs claim "$PWD")
+  local kind label cmd sid tool rc
+  IFS=$'\t' read -r kind label cmd sid tool < <(AGENT_TABS_NO_WAIT=1 agent-tabs claim "$PWD")
   if [ "$kind" = R ]; then
     agent-tabs msg resuming "label=$label" "cmd=$cmd"
     history -s "$cmd"
     eval "$cmd"
+    rc=$?
+    printf '\e[?1049l\e[?25h\e[0m'
+    if [ $rc -ne 0 ]; then
+      echo
+      echo "────────────────────────────────────────────────────────────"
+      agent-tabs msg resume_failed "label=$label" "cmd=$cmd" "rc=$rc" "sid=$sid"
+      echo "────────────────────────────────────────────────────────────"
+      echo
+      agent-tabs preserve "$sid" 2>/dev/null || true
+    fi
   else
     agent-tabs msg none_here "dir=$PWD"
     agent-tabs
