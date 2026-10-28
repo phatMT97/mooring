@@ -216,22 +216,23 @@ body.sidebar-auto #pane.peek {
   box-shadow: 0 0 0 2px var(--side), 0 0 10px var(--needs);
   animation: pulse 1.6s ease-in-out infinite;
 }
-/* working: a light running around the avatar's rounded border (GPU-composited with 0 repaints) */
+/* working: a light running around the avatar's rounded border */
+@property --orbit { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
 .avatar.working::after {
   content: "";
   position: absolute;
   inset: -3px;
   border-radius: 13px;
   padding: 2px;
-  background: conic-gradient(transparent 0deg 200deg, var(--tc) 300deg, var(--text) 355deg, transparent 360deg);
+  background: conic-gradient(from var(--orbit), transparent 0deg 200deg, var(--tc) 300deg, var(--text) 355deg, transparent 360deg);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  animation: spin 1.6s linear infinite;
+  animation: orbit 1.6s linear infinite;
   animation-delay: var(--phase, 0ms);
-  will-change: transform;
   pointer-events: none;
 }
+@keyframes orbit { to { --orbit: 360deg; } }
 body.sidebar-auto #pane:not(.peek) .avatar.working::after { border-radius: 15px; }
 
 /* hibernated / sleeping tabs: dimmed with dashed avatar border */

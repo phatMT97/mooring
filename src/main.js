@@ -239,11 +239,9 @@ async function wakeTab(tab) {
   tab.status = "idle";
   tab.term.write("\r\n\x1b[32m[Mooring] ⚡ Resuming session...\x1b[0m\r\n");
   await spawn(tab);
-  if (tab.sessionId) {
-    const cmd = tab.agentLauncher
-      ? launcherCommand(tab, tab.agentLauncher)
-      : (tab.agentTool === "codex" ? `codex resume ${tab.sessionId}` : `${tab.agentTool || "agent"} --resume ${tab.sessionId}`);
-    queueCommand(tab, cmd);
+  if (tab.sessionId && tab.shell !== "wsl") {
+    const cmd = resumeCommand(tab);
+    if (cmd) queueCommand(tab, cmd);
   }
   render();
   persist();
@@ -354,7 +352,18 @@ function launcherChoices(tab) {
 }
 
 function launcherCommand(tab, launcher) {
-  return `${launcher} ${tab.agentTool === "codex" ? "resume" : "--resume"}`;
+  if (tab?.agentTool === "codex") return `${launcher} resume`;
+  if (tab?.agentTool === "agy") return `${launcher} --conversation`;
+  return `${launcher} --resume`;
+}
+
+function resumeCommand(tab) {
+  if (!tab?.sessionId) return "";
+  const launcher = tab.agentLauncher || tab.agentTool;
+  if (!launcher) return "";
+  if (tab.agentTool === "codex") return `${launcher} resume ${tab.sessionId}`;
+  if (tab.agentTool === "agy") return `${launcher} --conversation ${tab.sessionId} --dangerously-skip-permissions`;
+  return `${launcher} --resume ${tab.sessionId}`;
 }
 
 async function closeTab(id) {
@@ -1575,9 +1584,7 @@ await listen("pty-exit", ({ payload: id }) => {
   tab.status = "exited";
   tab.term.write("\x1b[?1049l\x1b[?25h");
   if (tab.sessionId) {
-    const resumeCmd = tab.agentLauncher
-      ? launcherCommand(tab, tab.agentLauncher)
-      : `${tab.agentTool || "agent"} resume ${tab.sessionId}`;
+    const resumeCmd = resumeCommand(tab) || `${tab.agentLauncher || tab.agentTool || "agent"} resume ${tab.sessionId}`;
     tab.term.write(`\r\n\x1b[33m[Mooring] ${t("term.sessionExited", {
       name: tab.sessionTitle || tab.sessionId.slice(0, 8),
       cmd: resumeCmd,
