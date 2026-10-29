@@ -322,6 +322,65 @@ class PreserveAndClaimTests(unittest.TestCase):
                 agent.cmd_running("dev.mooring")
             self.assertEqual(out.getvalue().strip(), "[]")
 
+    def test_cmd_freeze_ignores_daemon(self):
+        with patch.object(agent, "markers", return_value=[("1.json", {"shell_pid": 100, "termdeck_tab": "1", "termdeck_app": "app"})]), \
+                patch.object(agent, "alive", return_value=True), \
+                patch.object(agent, "children_map", return_value={100: [200]}), \
+                patch.object(agent, "proc_cmdline", side_effect=lambda pid: ["codex", "app-server", "--managed-daemon"] if pid == 200 else ["bash"]), \
+                patch.object(agent.os, "kill") as mock_kill:
+            agent.cmd_freeze("1", "app")
+            mock_kill.assert_called_once_with(100, agent.signal.SIGSTOP)
+
+    def test_auto_resume_ignores_mouse_tracking_escape_sequences(self):
+        import pty, os, subprocess, tempfile, select, time
+        master, slave = pty.openpty()
+        with tempfile.TemporaryDirectory() as td:
+            fake_bin = Path(td) / "bin"
+            fake_bin.mkdir()
+            fake_at = fake_bin / "agent-tabs"
+            fake_at.write_text(
+                "#!/bin/bash\n"
+                "case \"$1\" in\n"
+                "  claim) printf \"R\\tTestSession\\techo RESUMED_OK\\tsid-123\\tcodex\\n\" ;;\n"
+                "  msg) shift; case \"$1\" in\n"
+                "    resume_prompt) echo -n \"Reopen prompt \" ;;\n"
+                "    cancelled) echo \"cancelled\" ;;\n"
+                "  esac ;;\n"
+                "  launchers) printf \"JSON\\t{}\\ncodex\\tcodex\\n\" ;;\n"
+                "esac\n"
+            )
+            fake_at.chmod(0o755)
+            env = os.environ.copy()
+            env.pop("AGENT_TABS_NO_CLAIM", None)
+            env.pop("BASH_EXECUTION_STRING", None)
+            env["TERMDECK_TAB"] = "1"
+            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+            bash_script = Path(__file__).parent.parent / "agent-tabs" / "agent-tabs.bash"
+
+            p = subprocess.Popen(["bash", "--rcfile", str(bash_script), "-i"],
+                                 stdin=slave, stdout=slave, stderr=slave, env=env, preexec_fn=os.setsid)
+            time.sleep(0.2)
+            # Send SGR mouse tracking events during prompt
+            os.write(master, b"\x1b[<35;5;32M\x1b[<35;7;32M")
+            time.sleep(2.3)
+            os.write(master, b"exit\n")
+            out = b""
+            while True:
+                r, _, _ = select.select([master], [], [], 0.3)
+                if not r:
+                    break
+                try:
+                    chunk = os.read(master, 1024)
+                    if not chunk:
+                        break
+                    out += chunk
+                except Exception:
+                    break
+            os.close(master)
+            os.close(slave)
+            p.kill()
+            self.assertIn("RESUMED_OK", out.decode(errors="ignore"))
+
 
 if __name__ == "__main__":
     unittest.main()

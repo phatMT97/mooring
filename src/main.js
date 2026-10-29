@@ -20,6 +20,7 @@ import { togglePalette } from "./palette.js";
 import { t, setLang, defaultLang, translateDom } from "./i18n.js";
 import { createAgentRestarter } from "./agent-restart.js";
 import { createTerminalViews, backgroundAction } from "./terminal-views.js";
+import { initAudio, playNeedsSound } from "./sound.js";
 
 // One accent per repo (sidebar, header, frame) and a faint tint of it behind the terminal,
 // both taken from the current theme (themes.js).
@@ -36,10 +37,13 @@ const DEFAULT_FONT_SIZE = 13;
 const win = getCurrentWindow();
 const appName = await getName().catch(() => "Mooring"); // "Mooring DEV" for the test build
 const appId = await getIdentifier();
-const state = { distro: "Ubuntu-24.04", active: null, nextId: 1, tabs: [], sidebar: "pinned", theme: "mocha", lang: null, defaultShell: "wsl", waitingOpen: false, fontSize: DEFAULT_FONT_SIZE, split: null, window: null };
+const state = { distro: "Ubuntu-24.04", active: null, nextId: 1, tabs: [], sidebar: "pinned", theme: "mocha", lang: null, defaultShell: "wsl", waitingOpen: false, fontSize: DEFAULT_FONT_SIZE, split: null, window: null, sound: true };
 // state.split = { ids: [first, second], dir: "row" | "col", ratio } shows two tabs side by side
 // (row) or stacked (col); state.active is the one with focus.
 const tabs = new Map(); // id -> runtime tab
+
+window.addEventListener("pointerdown", () => initAudio(), { passive: true });
+window.addEventListener("keydown", () => initAudio(), { passive: true });
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -109,6 +113,22 @@ function persist() {
 
 let wslHome = null;
 
+function onAgentOutput(tab) {
+  clearTimeout(tab.agentIdleTimer);
+  tab.agentIdleTimer = setTimeout(() => {
+    if ((tab.agentTool === "agy" || tab.agentTool === "codex") && tab.status === "working") {
+      const watching = tab.id === state.active && document.hasFocus();
+      tab.status = watching ? "idle" : "needs";
+      tab.since = Date.now();
+      if (!watching) {
+        win.requestUserAttention(2).catch(() => {});
+        if (state.sound) playNeedsSound();
+      }
+      render();
+    }
+  }, 2000);
+}
+
 // `show: false` opens it in the background (restore at launch, the new half of a split).
 async function openTab({
   shell, cwd = "", title = "", pinned = false, color = null, id = state.nextId++, show = true,
@@ -154,11 +174,19 @@ async function openTab({
 
   term.onData((data) => {
     if (tab.hibernated) {
-      if (data.includes("\r") || data.includes(" ")) wakeTab(tab);
+      wakeTab(tab);
       return;
     }
     if (tab.restarting) return;
-    if (data.includes("\r")) tab.atPrompt = false; // a command line was sent
+    if (data.includes("\r")) {
+      tab.atPrompt = false; // a command line was sent
+      if ((tab.agentTool === "agy" || tab.agentTool === "codex") && tab.status !== "working") {
+        tab.status = "working";
+        tab.since = Date.now();
+        render();
+        onAgentOutput(tab);
+      }
+    }
     invoke("pty_write", { id, data }).catch(() => {});
   });
   term.onResize(({ cols, rows }) => invoke("pty_resize", { id, cols, rows }).catch(() => {}));
@@ -181,6 +209,9 @@ async function openTab({
   term.parser.registerOscHandler(11, () => true);
   term.parser.registerOscHandler(111, () => true);
   term.attachCustomKeyEventHandler((e) => clipboardKeys(e, tab));
+  el.addEventListener("click", () => {
+    if (tab.hibernated) wakeTab(tab);
+  });
   el.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     if (tab.term.hasSelection()) {
@@ -212,9 +243,24 @@ async function openTab({
 
 let restoring = false; // set while the saved tabs are reopened at launch
 
+// Resets mouse tracking, alternate buffer, bracketed paste, keypad modes, cursor, and colors.
+const RESET_TERM_MODES =
+  "\x1b[?1000l\x1b[?1001l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l" +
+  "\x1b[?1049l\x1b[?47l\x1b[?2004l\x1b[?1l\x1b>\x1b[?25h\x1b[0m";
+
+function resetTerminalModes(term) {
+  if (term) term.write(RESET_TERM_MODES);
+}
+
 async function spawn(tab) {
   tab.status = "idle";
-  const output = new Channel((bytes) => tab.term.write(new Uint8Array(bytes)));
+  resetTerminalModes(tab.term);
+  const output = new Channel((bytes) => {
+    tab.term.write(new Uint8Array(bytes));
+    if ((tab.agentTool === "agy" || tab.agentTool === "codex") && tab.status === "working") {
+      onAgentOutput(tab);
+    }
+  });
   await invoke("pty_spawn", {
     output, id: tab.id, shell: tab.shell, cwd: tab.cwd || "", distro: state.distro,
     cols: tab.term.cols, rows: tab.term.rows, restoring, lang: state.lang,
@@ -224,10 +270,12 @@ async function spawn(tab) {
 
 async function hibernateTab(tab) {
   if (tab.hibernated) return;
+  clearTimeout(tab.agentIdleTimer);
   tab.hibernated = true;
   tab.status = "hibernated";
   if (tab.frozen) await thawTab(tab);
   await invoke("pty_kill", { id: tab.id }).catch(() => {});
+  resetTerminalModes(tab.term);
   tab.term.write(`\r\n\x1b[36m[Mooring] 🌙 ${t("tab.hibernate")}\x1b[0m\r\n\x1b[2mPress Enter or click to wake.\x1b[0m\r\n`);
   render();
   persist();
@@ -237,6 +285,7 @@ async function wakeTab(tab) {
   if (!tab.hibernated) return;
   tab.hibernated = false;
   tab.status = "idle";
+  resetTerminalModes(tab.term);
   tab.term.write("\r\n\x1b[32m[Mooring] ⚡ Resuming session...\x1b[0m\r\n");
   await spawn(tab);
   if (tab.sessionId && tab.shell !== "wsl") {
@@ -369,6 +418,7 @@ function resumeCommand(tab) {
 async function closeTab(id) {
   const tab = tabs.get(id);
   if (!tab) return;
+  clearTimeout(tab.agentIdleTimer);
   if (tab.status === "working") {
     const ok = await confirmDialog({
       title: t("close.tab.title"),
@@ -642,6 +692,7 @@ function flagNeeds(tab) {
   tab.status = "needs";
   tab.since = Date.now();
   win.requestUserAttention(2).catch(() => {}); // flash the taskbar button
+  if (state.sound) playNeedsSound();
   render();
 }
 
@@ -1481,7 +1532,10 @@ function onTitle(tab, title) {
     // finished a turn: if you are not looking at it, it now needs you
     const watching = tab.id === state.active && document.hasFocus();
     tab.status = watching ? "idle" : "needs";
-    if (!watching) win.requestUserAttention(2).catch(() => {});
+    if (!watching) {
+      win.requestUserAttention(2).catch(() => {});
+      if (state.sound) playNeedsSound();
+    }
   }
   if (tab.status !== was) {
     tab.since = Date.now();
@@ -1582,7 +1636,7 @@ await listen("pty-exit", ({ payload: id }) => {
   const tab = tabs.get(id);
   if (!tab || tab.hibernated) return;
   tab.status = "exited";
-  tab.term.write("\x1b[?1049l\x1b[?25h");
+  resetTerminalModes(tab.term);
   if (tab.sessionId) {
     const resumeCmd = resumeCommand(tab) || `${tab.agentLauncher || tab.agentTool || "agent"} resume ${tab.sessionId}`;
     tab.term.write(`\r\n\x1b[33m[Mooring] ${t("term.sessionExited", {
@@ -1637,6 +1691,7 @@ state.lang = setLang(saved?.lang || (saved ? "vi" : defaultLang()));
 state.sidebar = saved?.sidebar || state.sidebar;
 state.defaultShell = saved?.defaultShell || state.defaultShell;
 state.waitingOpen = !!saved?.waitingOpen;
+state.sound = saved?.sound !== undefined ? !!saved.sound : true;
 state.collapsed = Array.isArray(saved?.collapsed) ? saved.collapsed : [];
 state.theme = saved?.theme || "mocha";
 setTheme(state.theme);
@@ -1648,6 +1703,12 @@ themeBtn.onclick = () => toggleThemePicker(themeBtn, {
   shell: () => state.defaultShell,
   onShell: (shell) => {
     state.defaultShell = shell;
+    persist();
+  },
+  sound: () => state.sound,
+  onSound: (enabled) => {
+    state.sound = enabled;
+    if (enabled) playNeedsSound();
     persist();
   },
   onLang: (code) => {
@@ -1743,6 +1804,11 @@ scheduleAgentPoll(15000);
 
 // keep the list current: when the window comes back to the front, and once a minute
 window.addEventListener("focus", () => {
+  const cur = tabs.get(state.active);
+  if (cur && cur.status === "needs") {
+    cur.status = "idle";
+    render();
+  }
   refreshAgents().catch(() => {});
   if (Date.now() - waitingAt > 5000) refreshWaiting();
   scheduleAgentPoll(15000);

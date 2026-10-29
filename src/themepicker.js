@@ -8,7 +8,7 @@ import { dismissable } from "./popover.js";
 
 let open = null; // the popover while shown
 
-export function toggleThemePicker(anchor, { current, preview, commit, onLang, shell, onShell }) {
+export function toggleThemePicker(anchor, { current, preview, commit, onLang, shell, onShell, sound, onSound }) {
   if (open) return open.close();
 
   const pop = document.createElement("div");
@@ -23,6 +23,9 @@ export function toggleThemePicker(anchor, { current, preview, commit, onLang, sh
       <div class="tp-langs" role="radiogroup"></div>
       <div class="tp-section">${t("picker.defaultShell")}</div>
       <div class="tp-langs tp-shells" role="radiogroup"></div>
+      ${sound && onSound ? `
+      <div class="tp-section">${t("picker.sound")}</div>
+      <div class="tp-langs tp-sounds" role="radiogroup"></div>` : ""}
       <div class="tp-section">${t("picker.theme")} · ${t("picker.dark")}</div><div class="tp-grid dark"></div>
       <div class="tp-section">${t("picker.theme")} · ${t("picker.light")}</div><div class="tp-grid light"></div>`;
 
@@ -44,6 +47,18 @@ export function toggleThemePicker(anchor, { current, preview, commit, onLang, sh
       b.textContent = name;
       b.onclick = () => { onShell(code); build(); };
       pop.querySelector(".tp-shells").append(b);
+    }
+
+    if (sound && onSound) {
+      for (const [val, label] of [[true, t("picker.soundOn")], [false, t("picker.soundOff")]]) {
+        const b = document.createElement("button");
+        b.className = "tp-lang" + (val === sound() ? " on" : "");
+        b.setAttribute("role", "radio");
+        b.setAttribute("aria-checked", String(val === sound()));
+        b.textContent = label;
+        b.onclick = () => { onSound(val); build(); };
+        pop.querySelector(".tp-sounds").append(b);
+      }
     }
 
     for (const th of THEMES) {

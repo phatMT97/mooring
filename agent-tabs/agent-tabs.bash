@@ -45,6 +45,7 @@ _agent_tabs_track() {  # $1 = name shown/used for resume, rest = real command
 }
 
 while IFS=$'\t' read -r _at_tool _f; do
+  [[ -z "$_f" ]] && continue
   if [[ $_at_tool == JSON ]]; then
     export AGENT_TABS_LAUNCHERS=$_f
     continue
@@ -74,8 +75,32 @@ if [[ $- == *i* && -t 0 && -z "$BASH_EXECUTION_STRING" && -z "$AGENT_TABS_NO_CLA
   export AGENT_TABS_NO_CLAIM=1  # only the tab's first shell claims
   IFS=$'\t' read -r _at_kind _at_label _at_cmd _at_sid _at_tool < <(agent-tabs claim "$PWD" 2>/dev/null)
   if [ "$_at_kind" = R ]; then
-    # auto-resume; any key within 2s cancels
-    if read -r -s -n 1 -t 2 -p "$(agent-tabs msg resume_prompt "label=$_at_label" "cmd=$_at_cmd")" _at_ans; then
+    # Disable terminal mouse tracking modes so leftover mouse events never flood stdin
+    printf '\e[?1000l\e[?1001l\e[?1002l\e[?1003l\e[?1004l\e[?1005l\e[?1006l\e[?1015l\e[?1016l'
+    # Drain any buffered mouse moves or stray input before displaying prompt
+    read -r -s -n 10000 -t 0.05 _at_discard 2>/dev/null || true
+    # auto-resume; any key within 2s cancels (mouse tracking sequences are filtered)
+    _at_cancelled=0
+    _at_prompt="$(agent-tabs msg resume_prompt "label=$_at_label" "cmd=$_at_cmd")"
+    printf '%s' "$_at_prompt"
+    _at_end=$((SECONDS + 2))
+    while [ $SECONDS -lt $_at_end ]; do
+      _at_remaining=$((_at_end - SECONDS))
+      [ $_at_remaining -le 0 ] && break
+      if read -r -s -n 1 -t $_at_remaining _at_ans; then
+        if [ "$_at_ans" = $'\x1b' ]; then
+          read -r -s -n 100 -t 0.05 _at_rest 2>/dev/null || true
+          if [[ "$_at_rest" == "[<"* || "$_at_rest" == "[M"* ]]; then
+            continue
+          fi
+        fi
+        _at_cancelled=1
+        break
+      else
+        break
+      fi
+    done
+    if [ $_at_cancelled -eq 1 ]; then
       agent-tabs msg cancelled
       agent-tabs preserve "$_at_sid" 2>/dev/null || true
     else
@@ -98,7 +123,7 @@ if [[ $- == *i* && -t 0 && -z "$BASH_EXECUTION_STRING" && -z "$AGENT_TABS_NO_CLA
   elif [ "$_at_kind" = N ]; then
     agent-tabs msg leftover "n=$_at_label"
   fi
-  unset _at_kind _at_label _at_cmd _at_sid _at_tool _at_ans _at_rc
+  unset _at_kind _at_label _at_cmd _at_sid _at_tool _at_ans _at_rc _at_prompt _at_cancelled _at_end _at_remaining _at_rest _at_discard
 fi
 
 # Resume a session waiting for this folder later on (e.g. one that was still running elsewhere

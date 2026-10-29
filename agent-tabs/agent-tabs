@@ -538,12 +538,19 @@ def launcher_options(marker, tool):
     return sorted(names)
 
 
+def is_daemon_proc(pid):
+    cmd = proc_cmdline(pid)
+    return any(arg in ("app-server", "--managed-daemon", "daemon") for arg in cmd)
+
+
 def cmd_freeze(tab, app):
     kids = children_map()
     for _, m in markers():
         if str(m.get("termdeck_tab")) == str(tab) and m.get("termdeck_app") == app and alive(m):
             pids = [m["shell_pid"]] + descendants(m["shell_pid"], kids)
             for p in pids:
+                if is_daemon_proc(p):
+                    continue
                 try:
                     os.kill(p, signal.SIGSTOP)
                 except OSError:
